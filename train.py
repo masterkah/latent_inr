@@ -34,16 +34,12 @@ def train():
     # training
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     NUM_EPOCHS = 100
-    VIZ_INTERVAL = 500  # log and visualize every N steps
+    VIZ_INTERVAL = 5000  # log and visualize every N steps
     REG_WEIGHT = 0
-    DECODER_LR_BASE = (
-        1e-5  # base lr, scaled by nb of distinct shapes per batch (DeepSDF: 1e-5 * B)
-    )
+    DECODER_LR = 1e-5
     LATENT_LR = 5e-3
 
     # model size
-    # If None, we auto-set to the minimal valid width (input_dim + 1)
-    # If too small, we auto-set to minimal valid width
     HIDDEN_DIM = 512
     NUM_LAYERS = 6
     MODEL_DROPOUT = 0
@@ -82,7 +78,7 @@ def train():
     )
 
     # --- SWEEP LATENT SIZES ---
-    latent_sizes = [16, 128, 300]
+    latent_sizes = [16, 128, 192]
     average_psnr_histories = {}  # To compare latent sizes at the end
 
     for z_dim in latent_sizes:
@@ -92,21 +88,12 @@ def train():
         fourier_features = FourierFeatures(
             coord_size=2, freq_num=FF_FREQS, freq_scale=FF_SCALE
         )  # for now coord_size is hardcoded (we only play with image coordinates as a start)
-        input_dim = z_dim + fourier_features.out_size
-        min_hidden_dim = (
-            input_dim + 1
-        )  # minimal working width to keep the skip-connection layer positive
-        hidden_dim = (
-            max(HIDDEN_DIM, min_hidden_dim)
-            if HIDDEN_DIM is not None
-            else min_hidden_dim
-        )
 
         out_channels = dataset.C
 
         config = {
             "latent_dim": z_dim,
-            "hidden_dim": hidden_dim,
+            "hidden_dim": HIDDEN_DIM,
             "num_layers": NUM_LAYERS,
             "img_size": IMAGE_SIZE,
             "nb_images": K_IMAGES,
@@ -133,8 +120,7 @@ def train():
         # --> Model init
         model = AutoDecoderWrapper(
             num_images=K_IMAGES,
-            hidden_dim=hidden_dim,
-            coord_size=fourier_features.out_size,  # important, we go from (x,y) to (x'1,...x'FF_FREQS*2) with fourier features
+            hidden_dim=HIDDEN_DIM,
             pos_encoder=fourier_features,
             latent_dim=z_dim,
             sigma=INIT_SIGMA,
@@ -163,7 +149,7 @@ def train():
             [
                 {
                     "params": model.decoder.parameters(),
-                    "lr": DECODER_LR_BASE,  # will be scaled per batch by distinct shapes
+                    "lr": DECODER_LR,
                 },
                 {
                     "params": model.latents.parameters(),
@@ -171,19 +157,6 @@ def train():
                 },
             ]
         )
-        # LR plateau tracking
-        decoder_base_lr = DECODER_LR_BASE
-        latent_lr = LATENT_LR
-        plateau_best_psnr = -float("inf")
-        plateau_bad_epochs = 0
-        plateau_factor = 0.8
-        plateau_patience = 2
-        plateau_min_lr = 1e-6
-        # Treat metric as plateaued when it wiggles within a tiny band for a couple evals
-        plateau_flat_window = 2
-        plateau_flat_eps = 0.1  # dB band
-        plateau_improve_eps = 0.05  # dB improvement needed
-        plateau_metric_history = []
 
         loss_criterion = (
             nn.MSELoss()
@@ -199,12 +172,6 @@ def train():
                 batch_indices = batch_indices.to(DEVICE)
                 batch_coords = batch_coords.to(DEVICE)
                 batch_targets = batch_targets.to(DEVICE)
-
-                # Scale decoder LR by number of distinct images in this batch (DeepSDF heuristic: 1e-5 * B)
-                shape_count = batch_indices.unique().numel()
-                decoder_lr = decoder_base_lr * shape_count
-                optimizer.param_groups[0]["lr"] = decoder_lr
-                optimizer.param_groups[1]["lr"] = latent_lr
 
                 # 2 -> Forward Pass !!
                 optimizer.zero_grad()
@@ -239,7 +206,6 @@ def train():
                         current_avg += val
                     last_avg_psnr = current_avg / K_IMAGES
                     avg_psnr_history.append(last_avg_psnr)
-                    plateau_metric_history.append(last_avg_psnr)
 
                     # Save images & t-SNE
                     save_reference_reconstructions(
@@ -252,32 +218,6 @@ def train():
                         run_folder,
                         expected_num_clusters=len(DATASET_NAMES),
                     )
-
-                    # Reduce LR on plateau (monitor average PSNR; maximize)
-                    if last_avg_psnr is not None:
-                        if last_avg_psnr > plateau_best_psnr + plateau_improve_eps:
-                            plateau_best_psnr = last_avg_psnr
-                            plateau_bad_epochs = 0
-                        else:
-                            is_flat = False
-                            if len(plateau_metric_history) >= plateau_flat_window:
-                                recent = plateau_metric_history[-plateau_flat_window:]
-                                if max(recent) - min(recent) < plateau_flat_eps:
-                                    is_flat = True
-                            plateau_bad_epochs = (
-                                plateau_bad_epochs + 1 if is_flat else 0
-                            )
-                            if plateau_bad_epochs >= plateau_patience:
-                                decoder_base_lr = max(
-                                    decoder_base_lr * plateau_factor, plateau_min_lr
-                                )
-                                latent_lr = max(
-                                    latent_lr * plateau_factor, plateau_min_lr
-                                )
-                                plateau_bad_epochs = 0
-                                print(
-                                    f"    Plateau detected: reducing decoder base LR to {decoder_base_lr:.2e}, latent LR to {latent_lr:.2e}"
-                                )
 
                 if step % 100 == 0:
                     psnr_display = (

@@ -1,7 +1,6 @@
 import torch
 import torch.nn as nn
 from torch.nn.utils.parametrizations import weight_norm as param_weight_norm
-import numpy as np
 
 # ---------------------------------------------
 # NN Architecture (DeepSDF + Pos encoding)
@@ -24,31 +23,21 @@ class DeepSDFNet(nn.Module):
         # otherwise fall back to the raw coordinate size.
         extra_size = pos_encoder.out_size if pos_encoder is not None else coord_size
         self.input_dim = latent_dim + extra_size
-        self.hidden_dim = hidden_dim
         self.pos_encoder = pos_encoder
-        if self.hidden_dim <= self.input_dim:
-            raise ValueError(
-                f"hidden_dim must be greater than input_dim (got hidden_dim={hidden_dim}, input_dim={self.input_dim})"
-            )
 
         # Decide where to apply the skip connection relative to depth.
         interior_layers = max(1, num_layers - 2)  # ModuleList length
-        self.skip_reduce_idx = max(1, interior_layers // 2)
-        self.skip_concat_idx = self.skip_reduce_idx + 1
+        self.skip_concat_idx = max(1, interior_layers // 2 + 1)
 
         # In the paper they use 8 fully connected layers with weight norm (let's try without later)
         self.layer_0 = param_weight_norm(nn.Linear(self.input_dim, hidden_dim))
 
         self.layers = nn.ModuleList()
         for i in range(1, num_layers - 1):
-            input_size = hidden_dim
+            input_size = (
+                hidden_dim + self.input_dim if i == self.skip_concat_idx else hidden_dim
+            )
             output_size = hidden_dim
-
-            # "Skip connection" at middle layer
-            # Beware with the in/out dims, the OUTPUT dim of the skip layer
-            # should be (hidden dim) - (input dim) to later cat this output with the first input
-            if i == self.skip_reduce_idx:
-                output_size -= self.input_dim
 
             self.layers.append(param_weight_norm(nn.Linear(input_size, output_size)))
             print(f"layer {i} added in:{input_size} out:{output_size}")

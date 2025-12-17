@@ -5,4 +5,4 @@ data/
 experiments/
 .DS_Store
 run_*/
-latent_size_comparison_sweep.png
+latent_size_comparison_sweep*.png
