@@ -84,6 +84,24 @@ class ShiftSineLayer(nn.Module):
             h = h + beta                 # Wh + b + β
         y = torch.sin(self.siren_factor * h)   # sin(ω0 (Wh + b + β))
         return y
+
+
+class ShiftReLULayer(nn.Module):
+    """ReLU layer with shift modulation (similar to ShiftSineLayer but with ReLU activation)"""
+    def __init__(self, in_size, out_size, **kwargs):
+        super().__init__()
+        self.linear = nn.Linear(in_size, out_size, bias=True)
+
+    def forward(self, x, beta=None):
+        """
+        x: (B, in_size)
+        beta: (B, out_size)  
+        """
+        h = self.linear(x)               # Wh + b
+        if beta is not None:
+            h = h + beta                 # Wh + b + β
+        y = torch.relu(h)
+        return y
     
 class ModulatedSIREN(nn.Module):
     def __init__(self,
@@ -112,6 +130,35 @@ class ModulatedSIREN(nn.Module):
             beta = betas[i]
             # print(f"[Layer {i}] β mean: {beta.mean().item():.4f}, std: {beta.std().item():.4f}")
 
+            x = layer(x, beta=beta)
+
+        x = self.layers[-1](x)
+        return x
+
+
+class ModulatedReLU(nn.Module):
+    """Modulated MLP with ReLU activation (alternative to ModulatedSIREN)"""
+    def __init__(self,
+                 in_size: int,
+                 out_size: int,
+                 hidden_size: int = 128,
+                 num_layers: int = 3,
+                 **kwargs):
+        super().__init__()
+
+        layers = []
+        layers.append(ShiftReLULayer(in_size, hidden_size, **kwargs))
+        for _ in range(num_layers - 1):
+            layers.append(ShiftReLULayer(hidden_size, hidden_size, **kwargs))
+        layers.append(nn.Linear(hidden_size, out_size))
+        self.layers = nn.ModuleList(layers)
+
+    def forward(self, x: torch.Tensor, betas=None):
+        if betas is None:
+            betas = [None] * (len(self.layers) - 1)
+
+        for i, layer in enumerate(self.layers[:-1]):
+            beta = betas[i]
             x = layer(x, beta=beta)
 
         x = self.layers[-1](x)
@@ -245,17 +292,21 @@ class PositionalEncoding(nn.Module):
 
 class VQINR(nn.Module):
     """
-    VQ-INR: Image Compression with Vector Quantization and Modulated SIREN
+    VQ-INR: Image Compression with Vector Quantization and Modulated Network
     
     Architecture for image compression:
     1. Learnable latent vector per image (compressed representation)
     2. VQ: Quantizes latent vector using codebook
-    3. Modulation: Quantized latent modulates SIREN layers
-    4. Decoder (ModulatedSIREN): Maps coordinates to pixel values
+    3. Modulation: Quantized latent modulates network layers
+    4. Decoder (ModulatedSIREN or ModulatedReLU): Maps coordinates to pixel values
     
     For compression:
     - Store: quantized indices (compact)
     - Reconstruct: decode from indices + coordinates
+    
+    Supports two activation types:
+    - 'siren': SIREN with periodic activation (sin)
+    - 'relu': ReLU with positional encoding (recommended: set num_freqs >= 10)
     """
     def __init__(self,
                  coord_dim: int,
@@ -267,7 +318,8 @@ class VQINR(nn.Module):
                  siren_factor: float = 30.0,
                  commitment_cost: float = 0.25,
                  num_latent_vectors: int = 1,  # Number of latent vectors per image
-                 num_freqs: int = 0,  # Number of frequencies for positional encoding
+                 num_freqs: int = 10,  # Number of frequencies for positional encoding (important for ReLU)
+                 activation: str = 'relu',  # 'siren' or 'relu'
                  **kwargs):
         super().__init__()
         
@@ -277,8 +329,9 @@ class VQINR(nn.Module):
         self.num_layers = num_layers
         self.num_latent_vectors = num_latent_vectors
         self.num_freqs = num_freqs
+        self.activation = activation
         
-        # Positional Encoding
+        # Positional Encoding (required for ReLU, optional for SIREN)
         if num_freqs > 0:
             self.pos_enc = PositionalEncoding(num_freqs)
             decoder_in_dim = coord_dim * (2 * num_freqs + 1)
@@ -298,20 +351,29 @@ class VQINR(nn.Module):
             **kwargs
         )
         
-        # Modulation layers: generate beta parameters for each SIREN layer
-        # ModulatedSIREN has num_layers ShiftSineLayers (1 input + num_layers-1 hidden)
+        # Modulation layers: generate beta parameters for each layer
         self.modulation_layers = nn.ModuleList([
             nn.Linear(latent_dim, hidden_size) for _ in range(num_layers)
         ])
         
-        # Decoder: Modulated SIREN
-        self.decoder = ModulatedSIREN(
-            in_size=decoder_in_dim,
-            out_size=value_dim,
-            hidden_size=hidden_size,
-            num_layers=num_layers,
-            siren_factor=siren_factor
-        )
+        # Decoder: Modulated SIREN or Modulated ReLU
+        if activation == 'siren':
+            self.decoder = ModulatedSIREN(
+                in_size=decoder_in_dim,
+                out_size=value_dim,
+                hidden_size=hidden_size,
+                num_layers=num_layers,
+                siren_factor=siren_factor
+            )
+        elif activation == 'relu':
+            self.decoder = ModulatedReLU(
+                in_size=decoder_in_dim,
+                out_size=value_dim,
+                hidden_size=hidden_size,
+                num_layers=num_layers
+            )
+        else:
+            raise ValueError(f"Unknown activation type: {activation}. Use 'siren' or 'relu'.")
     
     def forward(self, coords: torch.Tensor, latent_idx: int = 0):
         """
