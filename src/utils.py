@@ -18,6 +18,7 @@ from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
 
 # from a pytorch forum ->
+# [TODO, MODIF] check if this includes ALL parameters (it probably does not) such as the conv layer in the new wrapper (and refine the function for the thing to plot nb of latent params)
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -52,40 +53,66 @@ def calculate_psnr(mse_loss):
     return -10 * torch.log10(mse_loss + 1e-8)
 
 
-def evaluate_dataset_psnr(model, dataset, device):
+# [MODIF] the helper to reconstruct images in the multires setting. Could be adapded for both!
+def reconstruct_single_image(model, img_idx, dataset, device, batch_size=4096):
     """
-    Iterates over every image in the dataset, reconstructs it fully,
-    and calculates the PSNR per image.
-    Returns: dict {img_idx: psnr_value}
+    Helper: Reconstructs a single image by batching the coordinate grid.
+    Returns: Flat Tensor of shape (H*W, C)
     """
     model.eval()
-    psnr_dict = {}
+
+    # Get all coordinates (H*W, 2)
     all_coords = dataset.shared_coords.to(device)
-    mse_fn = nn.MSELoss()
+    total_pixels = all_coords.shape[0]
+
+    pred_chunks = []
 
     with torch.no_grad():
-        for k in range(dataset.K):
-            # 1. Get Latent for Image k
-            idx_tensor = torch.tensor([k], device=device)
-            z_vec = model.latents(idx_tensor)  # (1, dim)
+        # Process in chunks to prevent GPU out-of-memory on large grids
+        for i in range(0, total_pixels, batch_size):
+            # 1. Prepare Chunk
+            coord_chunk = all_coords[i : i+batch_size]
+            chunk_len = coord_chunk.shape[0]
 
-            # 2. Expand for full grid
-            z_expanded = z_vec.repeat(all_coords.shape[0], 1)
+            # 2. Prepare Indices (All same image index)
+            idx_chunk = torch.full((chunk_len,), img_idx, dtype=torch.long, device=device)
 
-            # 3. Predict
-            pred_pixels = model.decoder(all_coords, z_expanded)
+            # 3. Model Forward
+            # Works for both Spatial (AutoDecoderCNN) and Vector (Standard) models
+            pred_batch, _ = model(idx_chunk, coord_chunk)
 
-            # 4. Get GT
-            gt_pixels = dataset.flat_pixels[k].to(device)
+            pred_chunks.append(pred_batch)
 
-            # 5. Compute MSE & PSNR
-            mse = mse_fn(pred_pixels, gt_pixels)
-            psnr = calculate_psnr(mse)
-            psnr_dict[k] = psnr.item()
+    # Concatenate all chunks back into one big vector
+    return torch.cat(pred_chunks, dim=0)
+
+# [TODO] replaced, but still need to figure out the best way to have both settings (multires and normal) using the same helpers
+# but the reconstruction is by construction different. But know that in the s=1 case we fall back to the simple resolution setting
+# In fact, only thing to figure out is the reconstruct_single_image function
+# def evaluate_dataset_psnr(model, dataset, device):
+#     """
+#     Iterates over every image in the dataset, reconstructs it fully,
+#     and calculates the PSNR per image.
+#     Returns: dict {img_idx: psnr_value}
+#     """
+def evaluate_dataset_psnr(model, dataset, device):
+    psnr_dict = {}
+    mse_fn = nn.MSELoss()
+
+    for k in range(dataset.K):
+        # reconstruct image (using helper)
+        pred_flat = reconstruct_single_image(model, k, dataset, device)
+
+        # get GT (Flat)
+        gt_flat = dataset.flat_pixels[k].to(device)
+
+        # compute metric
+        mse = mse_fn(pred_flat, gt_flat)
+        psnr = calculate_psnr(mse)
+        psnr_dict[k] = psnr.item()
 
     model.train()
     return psnr_dict
-
 
 #  --------------------- Plotting & Saving ---------------------
 
@@ -128,11 +155,8 @@ def save_reference_reconstructions(
 
     with torch.no_grad():
         for k in selection_indices:
-            # Reconstruct
-            idx_tensor = torch.tensor([k], device=device)
-            z_vec = model.latents(idx_tensor)
-            z_expanded = z_vec.repeat(all_coords.shape[0], 1)
-            pred_pixels = model.decoder(all_coords, z_expanded)
+            # Reconstruct -> we use the new helper now
+            pred_pixels = reconstruct_single_image(model, k, dataset, device)
 
             # Reshape: (H, W, C) -> (C, H, W)
             recon_img = pred_pixels.reshape(H, W, C).permute(2, 0, 1).cpu()
@@ -185,8 +209,20 @@ def plot_tsne(
         representative selection (one thumbnail per cluster).
     """
     # 1) Collect latent codes
-    z_data = model.latents.weight.detach().cpu().numpy()
-    K_samples = z_data.shape[0]
+    # z_data = model.latents.weight.detach().cpu().numpy()
+    # K_samples = z_data.shape[0]
+
+    # [MODIF] this is different than before, latents are no longer simple embeddings
+    # in the multires setting so we get the latent variable directly then flatten accordingly
+    # Vector Model: (K, LatentDim)
+    # Spatial Model: (K, Channels, H, W)
+    z_data = model.latents.detach().cpu()
+
+    # We flatten per image (Universal Fix)
+    # We want (K, Features).
+    # For vector: stays (K, Dim).
+    # For spatial: becomes (K, C*s*s) [TODO] Need to check if it still makes sense. In the case s=1, we fall back to the basic setting
+    K_samples = z_data.view(z_data.shape[0], -1).numpy()
 
     # 2) Run t-SNE (perplexity must be < n_samples)
     if expected_num_clusters < 1:

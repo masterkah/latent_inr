@@ -5,7 +5,7 @@ import matplotlib.pyplot as plt
 
 # local modules
 from src.dataset import PixelPointDataset, get_medmnist_data
-from src.model import AutoDecoderWrapper, FourierFeatures
+from src.model import AutoDecoderWrapper, AutoDecoderCNNWrapper, FourierFeatures
 from src.utils import (
     setup_experiment_folder,
     evaluate_dataset_psnr,
@@ -50,6 +50,11 @@ def train():
 
     # rng
     SEED = 42
+
+    # latent resolution stuff (to play with)
+    LATENT_CHANNELS = 32
+    LATENT_SPATIAL_DIM = 8
+
     # -------------------------------------- [End Config] -----------------------------------------
 
     print(f"Running on {DEVICE}")
@@ -94,6 +99,8 @@ def train():
         config = {
             "latent_dim": z_dim,
             "hidden_dim": HIDDEN_DIM,
+            "latent_channels": LATENT_CHANNELS,
+            "latent_spatial_dim": LATENT_SPATIAL_DIM,
             "num_layers": NUM_LAYERS,
             "img_size": IMAGE_SIZE,
             "nb_images": K_IMAGES,
@@ -117,12 +124,14 @@ def train():
         per_image_logs = {"steps": [], "data": {k: [] for k in range(K_IMAGES)}}
         avg_psnr_history = []  # For the final latent comparison plot
 
-        # --> Model init
-        model = AutoDecoderWrapper(
+        # --> Model init [MODIF] using the new wrapper!
+        model = AutoDecoderCNNWrapper(
             num_images=K_IMAGES,
             hidden_dim=HIDDEN_DIM,
             pos_encoder=fourier_features,
             latent_dim=z_dim,
+            latent_channels=LATENT_CHANNELS,        # new
+            latent_spatial_dim=LATENT_SPATIAL_DIM,  # new
             sigma=INIT_SIGMA,
             num_layers=NUM_LAYERS,
             out_channels=out_channels,
@@ -145,14 +154,16 @@ def train():
         )
 
         # --- Optimizer ---
+        # [TODO] Now we also need to optimize the conv parameters and the latents have a different format.
+        # Need to check if it still work as expected
         optimizer = torch.optim.Adam(
             [
                 {
-                    "params": model.decoder.parameters(),
+                    "params": list(model.decoder.parameters()) + list(model.conv.parameters()),
                     "lr": DECODER_LR,
                 },
                 {
-                    "params": model.latents.parameters(),
+                    "params": list(model.latents),
                     "lr": LATENT_LR,
                 },
             ]

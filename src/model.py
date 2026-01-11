@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.nn.utils.parametrizations import weight_norm as param_weight_norm
+import torch.nn.functional as F # for grid_sample
 
 # ---------------------------------------------
 # NN Architecture (DeepSDF + Pos encoding)
@@ -153,6 +154,62 @@ class AutoDecoderWrapper(nn.Module):
     def forward(self, image_indices, coords):
         # 1. Lookup z_i for this batch of pixels
         z_batch = self.latents(image_indices)
+
+        # 2. Feed (z, coords) to MLP
+        pred_pixel_vals = self.decoder(coords, z_batch)
+
+        return pred_pixel_vals, z_batch
+
+
+# ================= New wrapper for multi resolution BRRRR =================
+# Mainly the same as before but with that thing in him
+# Feel free to cleen the code/comments etc as always
+
+class AutoDecoderCNNWrapper(nn.Module):
+    def __init__(self, num_images, latent_spatial_dim=8, latent_channels=32, latent_dim=32, hidden_dim=256, out_channels=1, coord_size=2, pos_encoder=None, sigma=1e-4):
+        super().__init__()
+        self.decoder = DeepSDFNet(latent_dim=latent_dim, hidden_dim=hidden_dim, out_channels=out_channels, coord_size=coord_size, pos_encoder=pos_encoder)
+
+        # Instead of nn.Embedding, we create a 4D Parameter Tensor
+        # Shape: (N_Images, channels, height (s), width (s))
+        # like -> (5, 32, 8, 8) (in the paper s <-> latent_spatial_dim; c <-> latent_channels; C <-> latent_dim (modulated latent channel))
+        self.latents = nn.Parameter(
+            torch.zeros(num_images, latent_channels, latent_spatial_dim, latent_spatial_dim)
+        )
+
+        # Initialize with Gaussian prior (just like DeepSDF)
+        nn.init.normal_(self.latents, 0.0, sigma)
+
+        # This gives structure to the latent space (simple conv layer, [TODO] try with a 1x1 conv and same size for c and C)
+        self.conv = nn.Conv2d(latent_channels, latent_dim, kernel_size=3, padding=1)
+
+    def forward(self, image_indices, coords):
+
+        # -> RETRIEVE THE GRIDS
+        # We slice the big parameter tensor to get the grids for these specific images
+        # Shape: (Batch, latent_channels, s, s)
+        current_grids = self.latents[image_indices]
+
+        # -> ADD SPATIAL STRUCTURE
+        # Apply the shared convolution, mixes information locally
+        # Shape: (Batch, latent_dim, s, s) bc 3x3 conv with 1 padding (so w,h doesn't change, only channels)
+        modulated_grids = self.conv(current_grids)
+
+        # -> INTERPOLATE (bilinear interpolation of the latents, given the coords to sample from the grid)
+        # need to find the feature vector at exact position (x,y)
+
+        # Reshape coords for grid_sample: (Batch, 1, 1, 2) (-> expected shape, see grid_sample documentation)
+        sample_coords = coords.view(-1, 1, 1, 2)
+
+        # Sample features: Output shape (Batch, latent_dim, 1, 1)
+        z_features = F.grid_sample(modulated_grids, sample_coords, align_corners=True) # align corner useful given that we used linspace for coords (see documentation)
+
+        # Flatten: (Batch, latent_dim)
+        z_batch = z_features.view(z_features.shape[0], -1)
+
+        ### LEGACY modified ###
+        # 1. Lookup z_i for this batch of pixels
+        # (done, it's in  z_batch)
 
         # 2. Feed (z, coords) to MLP
         pred_pixel_vals = self.decoder(coords, z_batch)
