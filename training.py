@@ -199,7 +199,8 @@ if __name__ == "__main__":
     TRAINING_EPOCHS = 10000
     LATENT_DIM = 32    
     NUM_CODES = 512     
-    COMMITMENT_COST = 0.25 
+    COMMITMENT_COST = 0.25
+    NUM_RESIDUAL_VQ_STAGES = 4  # Residual VQ: 4 stages for progressive refinement
     VISUALIZATION_INTERVALS = [0, 1000, 3000, 5000, 7500, 10000]
     
     IMAGE_SIZE = 64  
@@ -243,6 +244,8 @@ if __name__ == "__main__":
     multi_dataloader = DataLoader(multi_dataset, batch_size=1, shuffle=True, num_workers=0)
     
     # value_dim IS ALWAYS 3
+    # Residual VQ: Use NUM_RESIDUAL_VQ_STAGES codebooks for progressive refinement
+    print(f"Using Residual VQ with {NUM_RESIDUAL_VQ_STAGES} stages for {len(all_images_original)} images")
     vqinr_net = VQINR(
         coord_dim=2,
         value_dim=3, 
@@ -253,7 +256,8 @@ if __name__ == "__main__":
         siren_factor=SIREN_FACTOR,
         commitment_cost=COMMITMENT_COST,
         activation='relu',
-        num_latent_vectors=len(all_images_original)
+        num_latent_vectors=NUM_RESIDUAL_VQ_STAGES,  # RVQ stages per image
+        num_images=len(all_images_original)  # Total number of images
     )
     initialize_vqinr_weights(vqinr_net)
     
@@ -275,7 +279,12 @@ if __name__ == "__main__":
         log_every_n_steps=10
     )
     
-    print(f"Starting training on {len(all_images_original)} images...")
+    print(f"\nStarting training on {len(all_images_original)} images...")
+    print(f"Residual VQ Configuration:")
+    print(f"  - Number of RVQ stages: {NUM_RESIDUAL_VQ_STAGES}")
+    print(f"  - Codes per stage: {NUM_CODES}")
+    print(f"  - Latent dimension: {LATENT_DIM}")
+    print(f"  - Total compression: {NUM_RESIDUAL_VQ_STAGES} indices per image")
     print(f"Grayscale images will only update the 1st channel of the decoder.")
     trainer.fit(vqinr_module, train_dataloaders=multi_dataloader)
     

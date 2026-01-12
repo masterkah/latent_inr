@@ -292,16 +292,18 @@ class PositionalEncoding(nn.Module):
 
 class VQINR(nn.Module):
     """
-    VQ-INR: Image Compression with Vector Quantization and Modulated Network
+    VQ-INR: Image Compression with Residual Vector Quantization and Modulated Network
     
     Architecture for image compression:
-    1. Learnable latent vector per image (compressed representation)
-    2. VQ: Quantizes latent vector using codebook
-    3. Modulation: Quantized latent modulates network layers
+    1. Multiple learnable latent vectors per image (compressed representation)
+    2. Residual VQ: Multiple codebooks quantize residuals progressively
+       - First codebook approximates the first latent
+       - Subsequent codebooks approximate the residuals
+    3. Modulation: Summed quantized latents modulate network layers
     4. Decoder (ModulatedSIREN or ModulatedReLU): Maps coordinates to pixel values
     
     For compression:
-    - Store: quantized indices (compact)
+    - Store: quantized indices from all codebooks (compact)
     - Reconstruct: decode from indices + coordinates
     
     Supports two activation types:
@@ -317,7 +319,8 @@ class VQINR(nn.Module):
                  num_layers: int = 3,
                  siren_factor: float = 30.0,
                  commitment_cost: float = 0.25,
-                 num_latent_vectors: int = 1,  # Number of latent vectors per image
+                 num_latent_vectors: int = 4,  # Number of residual VQ stages per image
+                 num_images: int = 1,  # Number of images to encode
                  num_freqs: int = 10,  # Number of frequencies for positional encoding (important for ReLU)
                  activation: str = 'relu',  # 'siren' or 'relu'
                  **kwargs):
@@ -328,6 +331,7 @@ class VQINR(nn.Module):
         self.latent_dim = latent_dim
         self.num_layers = num_layers
         self.num_latent_vectors = num_latent_vectors
+        self.num_images = num_images
         self.num_freqs = num_freqs
         self.activation = activation
         
@@ -339,17 +343,22 @@ class VQINR(nn.Module):
             self.pos_enc = None
             decoder_in_dim = coord_dim
         
-        # Learnable latent vector(s) - this is what gets optimized during training
-        # For image compression, each image has its own latent representation
-        self.latent = nn.Parameter(torch.randn(num_latent_vectors, latent_dim))
+        # Learnable latent vectors for Residual VQ
+        # Shape: (num_images, num_latent_vectors, latent_dim)
+        # Each image has num_latent_vectors latent vectors for residual quantization
+        self.latents = nn.Parameter(torch.randn(num_images, num_latent_vectors, latent_dim))
         
-        # Vector Quantizer
-        self.vq = EMAVectorQuantizer(
-            num_codes=num_codes,
-            code_dim=latent_dim,
-            commitment_cost=commitment_cost,
-            **kwargs
-        )
+        # Multiple Vector Quantizers for Residual VQ
+        # Shared across all images - each VQ stage quantizes the residual from previous stages
+        self.vq_layers = nn.ModuleList([
+            EMAVectorQuantizer(
+                num_codes=num_codes,
+                code_dim=latent_dim,
+                commitment_cost=commitment_cost,
+                **kwargs
+            )
+            for _ in range(num_latent_vectors)
+        ])
         
         # Modulation layers: generate beta parameters for each layer
         self.modulation_layers = nn.ModuleList([
@@ -377,25 +386,57 @@ class VQINR(nn.Module):
     
     def forward(self, coords: torch.Tensor, latent_idx: int = 0):
         """
-        Forward pass for image compression
+        Forward pass with Residual Vector Quantization
         
         Args:
             coords: (B, coord_dim) normalized coordinates in [-1, 1]
-            latent_idx: which latent vector to use (for multi-image case)
+            latent_idx: which image to use (0 to num_images-1)
         
         Returns:
             values: (B, value_dim) reconstructed pixel values
-            indices: (num_latent_vectors,) codebook indices for compression
-            vq_loss: scalar VQ loss
+            indices: list of (1,) codebook indices from each VQ stage
+            vq_loss: scalar total VQ loss from all stages
         """
-        # Get the latent vector for this image
-        z = self.latent[latent_idx:latent_idx+1]  # (1, latent_dim)
+        # Get latent vectors for this image
+        img_latents = self.latents[latent_idx]  # (num_latent_vectors, latent_dim)
         
-        # Vector quantization - this is the compression step
-        z_q, indices, vq_loss = self.vq(z)  # (1, latent_dim), (1,), scalar
+        # Residual Vector Quantization
+        # Stage 1: quantize the first latent
+        # Stage 2-N: quantize the residual from previous stages
         
-        # Expand to match batch size
-        z_q = z_q.expand(coords.shape[0], -1)  # (B, latent_dim)
+        z_q_sum = torch.zeros(1, self.latent_dim, device=coords.device)
+        residual_target = torch.zeros(1, self.latent_dim, device=coords.device)
+        
+        all_indices = []
+        total_vq_loss = 0.0
+        
+        for stage_idx in range(self.num_latent_vectors):
+            # Get current stage's latent
+            z_stage = img_latents[stage_idx:stage_idx+1]  # (1, latent_dim)
+            
+            if stage_idx == 0:
+                # First stage: quantize the first latent directly
+                z_current = z_stage
+                residual_target = z_stage
+            else:
+                # Subsequent stages: quantize the residual
+                # Target = accumulated latents up to this stage
+                residual_target = residual_target + z_stage
+                # Current input = residual (difference between target and quantized sum)
+                z_current = residual_target - z_q_sum.detach()
+            
+            # Quantize current stage
+            z_q_stage, indices_stage, vq_loss_stage = self.vq_layers[stage_idx](z_current)
+            
+            # Accumulate quantized results
+            z_q_sum = z_q_sum + z_q_stage
+            
+            # Store indices and loss
+            all_indices.append(indices_stage)
+            total_vq_loss = total_vq_loss + vq_loss_stage
+        
+        # Use the sum of all quantized latents for modulation
+        z_q = z_q_sum.expand(coords.shape[0], -1)  # (B, latent_dim)
         
         # Generate modulation parameters (betas) from quantized latent
         betas = [mod_layer(z_q) for mod_layer in self.modulation_layers]
@@ -405,35 +446,62 @@ class VQINR(nn.Module):
         if self.pos_enc is not None:
             decoder_input = self.pos_enc(coords)
         
-        # Decode coordinates to pixel values with modulated SIREN
+        # Decode coordinates to pixel values with modulated network
         values = self.decoder(decoder_input, betas=betas)  # (B, value_dim)
         
-        return values, indices, vq_loss
+        return values, all_indices, total_vq_loss
     
     def compress(self, latent_idx: int = 0):
         """
-        Compress: Get the quantized indices for storage
+        Compress: Get the quantized indices from all VQ stages for storage
         
+        Args:
+            latent_idx: which image to compress (0 to num_images-1)
+            
         Returns:
-            indices: codebook indices (this is the compressed representation)
+            indices: list of codebook indices from each stage (compressed representation)
         """
-        z = self.latent[latent_idx:latent_idx+1]
-        _, indices, _ = self.vq(z)
-        return indices
+        img_latents = self.latents[latent_idx]  # (num_latent_vectors, latent_dim)
+        
+        z_q_sum = torch.zeros(1, self.latent_dim, device=self.latents.device)
+        residual_target = torch.zeros(1, self.latent_dim, device=self.latents.device)
+        all_indices = []
+        
+        for stage_idx in range(self.num_latent_vectors):
+            z_stage = img_latents[stage_idx:stage_idx+1]
+            
+            if stage_idx == 0:
+                z_current = z_stage
+                residual_target = z_stage
+            else:
+                residual_target = residual_target + z_stage
+                z_current = residual_target - z_q_sum.detach()
+            
+            z_q_stage, indices_stage, _ = self.vq_layers[stage_idx](z_current)
+            z_q_sum = z_q_sum + z_q_stage
+            all_indices.append(indices_stage)
+        
+        return all_indices
     
-    def decompress(self, coords: torch.Tensor, indices: torch.Tensor):
+    def decompress(self, coords: torch.Tensor, indices: list):
         """
-        Decompress: Reconstruct image from stored indices
+        Decompress: Reconstruct image from stored indices (Residual VQ)
         
         Args:
             coords: (B, coord_dim) coordinates to query
-            indices: codebook indices (compressed representation)
+            indices: list of codebook indices from each VQ stage
         
         Returns:
             values: (B, value_dim) reconstructed pixel values
         """
-        # Retrieve quantized latent from codebook
-        z_q = F.embedding(indices, self.vq.embedding)  # (1, latent_dim)
+        # Retrieve and sum quantized latents from all codebooks
+        z_q_sum = torch.zeros(1, self.latent_dim, device=coords.device)
+        
+        for stage_idx, idx in enumerate(indices):
+            z_q_stage = F.embedding(idx, self.vq_layers[stage_idx].embedding)
+            z_q_sum = z_q_sum + z_q_stage
+        
+        z_q = z_q_sum
         
         # Expand to match batch size
         z_q = z_q.expand(coords.shape[0], -1)  # (B, latent_dim)
