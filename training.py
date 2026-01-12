@@ -197,8 +197,8 @@ if __name__ == "__main__":
     NUM_LAYERS = 3
     LEARNING_RATE = 1e-4
     TRAINING_EPOCHS = 10000
-    LATENT_DIM = 64    
-    NUM_CODES = 128     
+    LATENT_DIM = 32    
+    NUM_CODES = 512     
     COMMITMENT_COST = 0.25 
     VISUALIZATION_INTERVALS = [0, 1000, 3000, 5000, 7500, 10000]
     
