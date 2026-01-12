@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
+import argparse
+import os
 
 # local modules
 from src.dataset import PixelPointDataset, get_medmnist_data
@@ -15,13 +17,12 @@ from src.utils import (
     set_global_seed,
 )
 
-
-def train():
+def train(debug=1, use_amp_tf32=1, output_folder="."):
     # -------------------------------------- [Config] --------------------------------------
     # dataset
-    K_IMAGES = 300
+    K_IMAGES = 3000
     IMAGE_SIZE = 64  # 224
-    BATCH_SIZE = 1024
+    BATCH_SIZE = 32768
     DATASET_NAMES = [
         "pneumoniamnist",
         "pathmnist",
@@ -33,8 +34,8 @@ def train():
 
     # training
     DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    NUM_EPOCHS = 100
-    VIZ_INTERVAL = 5000  # log and visualize every N steps
+    NUM_EPOCHS = 1000
+    VIZ_INTERVAL = 384 # corresponds to once per epoch in this setup
     REG_WEIGHT = 0
     DECODER_LR = 1e-5
     LATENT_LR = 5e-3
@@ -60,6 +61,17 @@ def train():
     print(f"Running on {DEVICE}")
     set_global_seed(SEED)
     print(f"Using global seed: {SEED}")
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = bool(use_amp_tf32)
+        torch.backends.cudnn.allow_tf32 = bool(use_amp_tf32)
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision(
+                "high" if use_amp_tf32 else "highest"
+            )
+    use_amp = bool(use_amp_tf32) and torch.cuda.is_available()
+
+    output_folder = output_folder or "."
+    os.makedirs(output_folder, exist_ok=True)
 
     # --- Data Loading ---
     images_tensor, image_sources, image_channels = get_medmnist_data(
@@ -79,11 +91,18 @@ def train():
     data_loader_generator = torch.Generator()
     data_loader_generator.manual_seed(SEED)
     train_loader = DataLoader(
-        dataset, batch_size=BATCH_SIZE, shuffle=True, generator=data_loader_generator
+        dataset,
+        batch_size=BATCH_SIZE,
+        shuffle=True,
+        generator=data_loader_generator,
+        num_workers=8,
+        pin_memory=True,
+        persistent_workers=True,
+        prefetch_factor=2,
     )
 
     # --- SWEEP LATENT SIZES ---
-    latent_sizes = [16, 128, 192]
+    latent_sizes = [16, 32, 64, 128, 256, 512]
     average_psnr_histories = {}  # To compare latent sizes at the end
 
     for z_dim in latent_sizes:
@@ -115,9 +134,12 @@ def train():
             "dataset_names": DATASET_NAMES,
             "dropout": MODEL_DROPOUT,
             "seed": SEED,
+            "output_folder": output_folder,
         }
         # --> Setup run folder
-        run_folder = setup_experiment_folder(config, base_name=f"run_latent_{z_dim}")
+        run_folder = setup_experiment_folder(
+            config, base_name=os.path.join(output_folder, f"run_latent_{z_dim}")
+        )
 
         # --> Logs stuff
         # Struct memo: {'steps': [0, 100...], 'data': {0: [], 1: []...}}
@@ -172,6 +194,7 @@ def train():
         loss_criterion = (
             nn.MSELoss()
         )  # [TODO] This is the L in the paper, I chose to use MSE for now. Try their clamped distance thing
+        scaler = torch.amp.GradScaler(enabled=use_amp)
 
         # -------------------------------------- [Training] --------------------------------------
         print("\n --- Starting Training... ---\n")
@@ -180,27 +203,29 @@ def train():
         for epoch in range(NUM_EPOCHS):
             print(f"--- Epoch {epoch + 1}/{NUM_EPOCHS} ---")
             for batch_indices, batch_coords, batch_targets in train_loader:
-                batch_indices = batch_indices.to(DEVICE)
-                batch_coords = batch_coords.to(DEVICE)
-                batch_targets = batch_targets.to(DEVICE)
+                batch_indices = batch_indices.to(DEVICE, non_blocking=True)
+                batch_coords = batch_coords.to(DEVICE, non_blocking=True)
+                batch_targets = batch_targets.to(DEVICE, non_blocking=True)
 
                 # 2 -> Forward Pass !!
-                optimizer.zero_grad()
-                pred_vals, z_batch = model(batch_indices, batch_coords)
+                optimizer.zero_grad(set_to_none=True)
+                with torch.amp.autocast(device_type=DEVICE.type, enabled=use_amp):
+                    pred_vals, z_batch = model(batch_indices, batch_coords)
 
-                # 3 -> Loss Calculation (see Eq 9 in the paper)
-                ### Reconstruction loss
-                rec_loss = loss_criterion(pred_vals, batch_targets)
+                    # 3 -> Loss Calculation (see Eq 9 in the paper)
+                    ### Reconstruction loss
+                    rec_loss = loss_criterion(pred_vals, batch_targets)
 
-                ### Latent regularization loss
-                # It penalizes the magnitude of latent codes used in this batch
-                reg_loss = torch.mean(torch.norm(z_batch, dim=1) ** 2) * REG_WEIGHT
+                    ### Latent regularization loss
+                    # It penalizes the magnitude of latent codes used in this batch
+                    reg_loss = torch.mean(torch.norm(z_batch, dim=1) ** 2) * REG_WEIGHT
 
-                total_loss = rec_loss + reg_loss
+                    total_loss = rec_loss + reg_loss
 
                 # 5. Backprop !!
-                total_loss.backward()
-                optimizer.step()
+                scaler.scale(total_loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
 
                 # Visualization trigger
                 if step % VIZ_INTERVAL == 0:
@@ -230,7 +255,9 @@ def train():
                         expected_num_clusters=len(DATASET_NAMES),
                     )
 
-                if step % 100 == 0:
+                if (debug and step % 100 == 0) or (
+                    (not debug) and step % VIZ_INTERVAL == 0
+                ):
                     psnr_display = (
                         f"{last_avg_psnr:.2f} dB"
                         if last_avg_psnr is not None
@@ -256,9 +283,35 @@ def train():
     plt.ylabel("Average PSNR (dB)")
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.savefig("latent_size_comparison_sweep.png")
+    plt.savefig(os.path.join(output_folder, "latent_size_comparison_sweep.png"))
     print("Done.")
 
 
 if __name__ == "__main__":
-    train()
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "-debug",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="1=verbose step logging, 0=log only at VIZ_INTERVAL",
+    )
+    parser.add_argument(
+        "-use-amp-tf32",
+        type=int,
+        default=1,
+        choices=[0, 1],
+        help="1=enable AMP + TF32 (CUDA only), 0=disable",
+    )
+    parser.add_argument(
+        "-output-folder",
+        type=str,
+        default=".",
+        help="Base folder for all outputs (run folders, plots, data).",
+    )
+    args = parser.parse_args()
+    train(
+        debug=args.debug,
+        use_amp_tf32=args.use_amp_tf32,
+        output_folder=args.output_folder,
+    )
