@@ -3,6 +3,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import argparse
+import os
 
 # local modules
 from src.dataset import PixelPointDataset, get_medmnist_data
@@ -16,7 +17,7 @@ from src.utils import (
     set_global_seed,
 )
 
-def train(debug=1, use_amp_tf32=1):
+def train(debug=1, use_amp_tf32=1, output_folder="."):
     # -------------------------------------- [Config] --------------------------------------
     # dataset
     K_IMAGES = 3000
@@ -63,6 +64,9 @@ def train(debug=1, use_amp_tf32=1):
                 "high" if use_amp_tf32 else "highest"
             )
     use_amp = bool(use_amp_tf32) and torch.cuda.is_available()
+
+    output_folder = output_folder or "."
+    os.makedirs(output_folder, exist_ok=True)
 
     # --- Data Loading ---
     images_tensor, image_sources, image_channels = get_medmnist_data(
@@ -123,9 +127,12 @@ def train(debug=1, use_amp_tf32=1):
             "dataset_names": DATASET_NAMES,
             "dropout": MODEL_DROPOUT,
             "seed": SEED,
+            "output_folder": output_folder,
         }
         # --> Setup run folder
-        run_folder = setup_experiment_folder(config, base_name=f"run_latent_{z_dim}")
+        run_folder = setup_experiment_folder(
+            config, base_name=os.path.join(output_folder, f"run_latent_{z_dim}")
+        )
 
         # --> Logs stuff
         # Struct memo: {'steps': [0, 100...], 'data': {0: [], 1: []...}}
@@ -191,7 +198,7 @@ def train(debug=1, use_amp_tf32=1):
 
                 # 2 -> Forward Pass !!
                 optimizer.zero_grad(set_to_none=True)
-                with torch.amp.autocast(enabled=use_amp):
+                with torch.amp.autocast(device_type=DEVICE.type, enabled=use_amp):
                     pred_vals, z_batch = model(batch_indices, batch_coords)
 
                     # 3 -> Loss Calculation (see Eq 9 in the paper)
@@ -265,7 +272,7 @@ def train(debug=1, use_amp_tf32=1):
     plt.ylabel("Average PSNR (dB)")
     plt.legend()
     plt.grid(True, alpha=0.3)
-    plt.savefig("latent_size_comparison_sweep.png")
+    plt.savefig(os.path.join(output_folder, "latent_size_comparison_sweep.png"))
     print("Done.")
 
 
@@ -285,5 +292,15 @@ if __name__ == "__main__":
         choices=[0, 1],
         help="1=enable AMP + TF32 (CUDA only), 0=disable",
     )
+    parser.add_argument(
+        "-output-folder",
+        type=str,
+        default=".",
+        help="Base folder for all outputs (run folders, plots, data).",
+    )
     args = parser.parse_args()
-    train(debug=args.debug, use_amp_tf32=args.use_amp_tf32)
+    train(
+        debug=args.debug,
+        use_amp_tf32=args.use_amp_tf32,
+        output_folder=args.output_folder,
+    )
