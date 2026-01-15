@@ -17,8 +17,7 @@ from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 # ------------------------ Misc. ------------------------
 
 
-# from a pytorch forum ->
-# [TODO, MODIF] check if this includes ALL parameters (it probably does not) such as the conv layer in the new wrapper (and refine the function for the thing to plot nb of latent params)
+# from a pytorch forum
 def count_parameters(model):
     return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
@@ -50,10 +49,11 @@ def setup_experiment_folder(config, base_name="experiment"):
 
 
 def calculate_psnr(mse_loss):
+    # add epsilon to avoid log(0).
     return -10 * torch.log10(mse_loss + 1e-8)
 
 
-# [MODIF] the helper to reconstruct images in the multires setting. Could be adapded for both!
+# Helper to reconstruct images in the multi-resolution setting.
 def reconstruct_single_image(model, img_idx, dataset, device, batch_size=4096):
     """
     Helper: Reconstructs a single image by batching the coordinate grid.
@@ -83,18 +83,9 @@ def reconstruct_single_image(model, img_idx, dataset, device, batch_size=4096):
 
             pred_chunks.append(pred_batch)
 
-    # Concatenate all chunks back into one big vector
+    # Concatenate all chunks back into one big vector, preserving dataset coord order.
     return torch.cat(pred_chunks, dim=0)
 
-# [TODO] replaced, but still need to figure out the best way to have both settings (multires and normal) using the same helpers
-# but the reconstruction is by construction different. But know that in the s=1 case we fall back to the simple resolution setting
-# In fact, only thing to figure out is the reconstruct_single_image function
-# def evaluate_dataset_psnr(model, dataset, device):
-#     """
-#     Iterates over every image in the dataset, reconstructs it fully,
-#     and calculates the PSNR per image.
-#     Returns: dict {img_idx: psnr_value}
-#     """
 def evaluate_dataset_psnr(model, dataset, device):
     psnr_dict = {}
     mse_fn = nn.MSELoss()
@@ -111,7 +102,7 @@ def evaluate_dataset_psnr(model, dataset, device):
         psnr = calculate_psnr(mse)
         psnr_dict[k] = psnr.item()
 
-    model.train()
+    model.train()  # return to training mode after evaluation
     return psnr_dict
 
 #  --------------------- Plotting & Saving ---------------------
@@ -144,7 +135,6 @@ def save_reference_reconstructions(
     per MedMNIST subset, using consistent indices across calls.
     """
     model.eval()
-    all_coords = dataset.shared_coords.to(device)
     H, W, C = dataset.H, dataset.W, dataset.C
 
     selection_indices = _select_reference_indices(dataset, max_per_dataset)
@@ -172,7 +162,7 @@ def save_reference_reconstructions(
     grid_img = make_grid(batch_tensor, nrow=5, padding=2)
 
     save_image(grid_img, os.path.join(run_folder, f"recons_refs_step_{step}.png"))
-    model.train()
+    model.train()  # return to training mode after evaluation
 
 
 def plot_tsne(
@@ -190,8 +180,8 @@ def plot_tsne(
 
     Args
     ----
-    model: AutoDecoderWrapper
-        Needs a `.latents.weight` parameter of shape (K, latent_dim).
+    model: nn.Module
+        Needs a `.latents` tensor with shape (K, latent_dim) or (K, C, s, s).
     dataset: PixelPointDataset
         Used to reconstruct the original images corresponding to each latent.
         We assume it has attributes:
@@ -208,25 +198,24 @@ def plot_tsne(
         of dataset sources). Used for t-SNE perplexity tuning and KMeans
         representative selection (one thumbnail per cluster).
     """
-    # 1) Collect latent codes
-    # z_data = model.latents.weight.detach().cpu().numpy()
-    # K_samples = z_data.shape[0]
-
-    # [MODIF] this is different than before, latents are no longer simple embeddings
-    # in the multires setting so we get the latent variable directly then flatten accordingly
+    # Latents are no longer simple embeddings in the multi-resolution setting.
+    # We flatten to a per-image feature vector for visualization.
     # Vector Model: (K, LatentDim)
-    # Spatial Model: (K, Channels, H, W)
+    # Spatial Model: (K, Channels, s, s)
     z_data = model.latents.detach().cpu()
 
-    # We flatten per image (Universal Fix)
+    # We flatten per image for visualization.
     # We want (K, Features).
     # For vector: stays (K, Dim).
-    # For spatial: becomes (K, C*s*s) [TODO] Need to check if it still makes sense. In the case s=1, we fall back to the basic setting
-    K_samples = z_data.view(z_data.shape[0], -1).numpy()
+    # For spatial: becomes (K, C*s*s). In the case s=1, we fall back to the basic setting.
+    z_data_flat = z_data.view(z_data.shape[0], -1).numpy()
+    K_samples = z_data_flat.shape[0]
 
-    # 2) Run t-SNE (perplexity must be < n_samples)
+    # Run t-SNE (perplexity must be < n_samples)
     if expected_num_clusters < 1:
         raise ValueError("expected_num_clusters must be >= 1")
+    if K_samples < 2:
+        raise ValueError("t-SNE requires at least 2 samples.")
     max_valid_perplexity = max(1, K_samples - 1)
     # Anchor perplexity to expected clusters so neighbors stay local enough to
     # reveal the separate modes we want to see.
@@ -240,12 +229,12 @@ def plot_tsne(
         learning_rate="auto",
         random_state=0,  # keep orientation stable across calls while data drifts
     )
-    z_embedded = tsne.fit_transform(z_data)
+    z_embedded = tsne.fit_transform(z_data_flat)
 
-    # 3) Decide how many thumbnails to show (cluster representatives)
+    # Decide how many thumbnails to show (cluster representatives)
     n_clusters = max(1, min(int(expected_num_clusters), K_samples))
 
-    # 4) Compute average colors for all images for use as scatter colors
+    # Compute average colors for all images for use as scatter colors
     colors = []
     for i in range(K_samples):
         img_flat = dataset.flat_pixels[i]
@@ -256,7 +245,7 @@ def plot_tsne(
         colors.append(avg_color)
     colors = np.clip(np.array(colors), 0.0, 1.0)
 
-    # 5) Choose representative indices (closest to cluster centers)
+    # Choose representative indices (closest to cluster centers) in embedded space.
     rep_indices = []
     if n_clusters == 1:
         rep_indices = [0] if K_samples > 0 else []
@@ -272,7 +261,7 @@ def plot_tsne(
             dists = np.linalg.norm(cluster_points - centers[c], axis=1)
             rep_indices.append(idxs[np.argmin(dists)])
 
-    # 6) Plot scatter for all points using the average colors
+    # Plot scatter for all points using the average colors
     point_size = 25  # scatter marker size
     fig, ax = plt.subplots(figsize=(6, 6))
     ax.scatter(
@@ -290,7 +279,7 @@ def plot_tsne(
     ax.grid(True, linestyle="--", linewidth=0.5, alpha=0.25)
     ax.tick_params(labelbottom=False, labelleft=False)
 
-    # 7) Overlay thumbnails for representative images
+    # Overlay thumbnails for representative images
     for idx in rep_indices:
         if idx >= dataset.K:
             continue
@@ -309,13 +298,21 @@ def plot_tsne(
         )
         ax.add_artist(ab)
 
-    ax.set_title(f"Latent space reduced to 2D with t-SNE (perplexity={perplexity})")
+    latent_spatial_dim = getattr(model, "latent_spatial_dim", 1)
+    space_label = (
+        "flattened latent grid space"
+        if latent_spatial_dim > 1
+        else "latent vector space"
+    )
+    ax.set_title(
+        f"Latent space reduced to 2D with t-SNE (perplexity={perplexity})\n"
+        f"Distance space: {space_label}"
+    )
 
-    # Show a small legend of latent-space distances, focusing on within/between
-    # cluster structure
+    # Show a small legend of distances in the original latent space (not t-SNE space).
     if K_samples > 1:
         latent_kmeans = KMeans(n_clusters=n_clusters, n_init=10, random_state=0)
-        cluster_labels = latent_kmeans.fit_predict(z_data)
+        cluster_labels = latent_kmeans.fit_predict(z_data_flat)
         cluster_centers = latent_kmeans.cluster_centers_
 
         # Within-cluster pairwise distances
@@ -324,7 +321,7 @@ def plot_tsne(
             idxs = np.where(cluster_labels == c)[0]
             if len(idxs) < 2:
                 continue
-            sub = z_data[idxs]
+            sub = z_data_flat[idxs]
             dists = np.linalg.norm(sub[:, None, :] - sub[None, :, :], axis=-1)
             upper = dists[np.triu_indices_from(dists, k=1)]
             within_all.append(upper)
@@ -351,7 +348,7 @@ def plot_tsne(
         ax.text(
             0.02,
             0.98,
-            "Latent L2 (orig. space)\n"
+            f"Latent L2 ({space_label})\n"
             f"  within clusters: {within_str}\n"
             f"  between clusters: {between_str}",
             ha="left",

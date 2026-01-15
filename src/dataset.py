@@ -43,14 +43,12 @@ class PixelPointDataset(Dataset):
         # thus matching the memory layout of the image tensor
         grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing="ij")
 
-        # Stack to (H, W, 2) then Flatten to (H*W, 2)
-        # Now we have a tensor of coordinates "linspaced" from [-1,-1] to [1,1] (there is exactly H*W coordinates)
-        # We also could have normalized pixel coordinates on the fly... Oui bon trop tard
+        # Stack to (H, W, 2) then flatten to (H*W, 2); reused for every image.
         self.shared_coords = torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
 
         # --- B. Flatten Images ---
         # Current: (K, C, H, W)
-        # Permute to: (K, H, W, C) -> Channel last is easier for pixel extraction (according to gemini)
+        # Permute to: (K, H, W, C) -> channel-last for pixel extraction
         # Reshape to: (K, H*W, C) -> Flatten spatial dims
         self.flat_pixels = images_tensor.permute(0, 2, 3, 1).reshape(self.K, -1, self.C)
 

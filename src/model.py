@@ -1,7 +1,7 @@
 import torch
 import torch.nn as nn
 from torch.nn.utils.parametrizations import weight_norm as param_weight_norm
-import torch.nn.functional as F # for grid_sample
+import torch.nn.functional as F  # for grid_sample
 
 # ---------------------------------------------
 # NN Architecture (DeepSDF + Pos encoding)
@@ -28,9 +28,10 @@ class DeepSDFNet(nn.Module):
 
         # Decide where to apply the skip connection relative to depth.
         interior_layers = max(1, num_layers - 2)  # ModuleList length
+        # Place skip concat around the middle of the MLP depth.
         self.skip_concat_idx = max(1, interior_layers // 2 + 1)
 
-        # In the paper they use 8 fully connected layers with weight norm (let's try without later)
+        # In the paper they use 8 fully connected layers with weight norm.
         self.layer_0 = param_weight_norm(nn.Linear(self.input_dim, hidden_dim))
 
         self.layers = nn.ModuleList()
@@ -41,7 +42,7 @@ class DeepSDFNet(nn.Module):
             output_size = hidden_dim
 
             self.layers.append(param_weight_norm(nn.Linear(input_size, output_size)))
-            print(f"layer {i} added in:{input_size} out:{output_size}")
+            print(f"layer {i} added in:{input_size} out:{output_size}")  # debug info
 
         # Output layer: Projects to 1 channel (Grayscale) or 3 (RGB)
         self.last_layer = nn.Linear(hidden_dim, out_channels)
@@ -87,7 +88,7 @@ class DeepSDFNet(nn.Module):
 
 
 class FourierFeatures(nn.Module):
-    """Positional encoder from Fourite Features [Tancik et al. 2020]
+    """Positional encoder from Fourier Features [Tancik et al. 2020]
     Implementation based on https://github.com/tancik/fourier-feature-networks/blob/master/Demo.ipynb
     """
 
@@ -95,6 +96,7 @@ class FourierFeatures(nn.Module):
         super().__init__()
         self.freq_num = freq_num  # Number of frequencies
         self.freq_scale = freq_scale  # Standard deviation of the frequencies
+        # Note: B_gauss is not registered as a buffer, so it won't be in state_dict.
         self.B_gauss = (
             torch.normal(0.0, 1.0, size=(coord_size, self.freq_num)) * self.freq_scale
         )
@@ -111,17 +113,16 @@ class FourierFeatures(nn.Module):
         return out
 
 
-# ------------------------------------------------
-# Auto-Decoder Wrapper (like in the DeepSDF paper)
-# -> added positional encoder (Fourier Features)
-# ------------------------------------------------
+# ================= Multi-resolution wrapper =================
+# Spatial latents that can recover classic single-vector behavior when s=1.
 
-
-class AutoDecoderWrapper(nn.Module):
+class AutoDecoderCNNWrapper(nn.Module):
     def __init__(
         self,
         num_images,
-        latent_dim=64,
+        latent_spatial_dim=8,
+        latent_channels=32,
+        latent_feature_dim=32,
         hidden_dim=256,
         num_layers=8,
         out_channels=1,
@@ -132,47 +133,21 @@ class AutoDecoderWrapper(nn.Module):
     ):
         super().__init__()
         self.decoder = DeepSDFNet(
-            latent_dim,
-            hidden_dim,
+            latent_dim=latent_feature_dim,
+            hidden_dim=hidden_dim,
             num_layers=num_layers,
             out_channels=out_channels,
             coord_size=coord_size,
             pos_encoder=pos_encoder,
             dropout_prob=dropout_prob,
         )
-
-        # the latent codes {z_i} we store within the wrapper
-        # we use an embedding layer as a lookup table for learnable parameters -> thanks gemini
-        self.latents = nn.Embedding(
-            num_images, latent_dim
-        )  # there is one latent vector per image
-
-        # gaussian prior over the latent z + we initialize them with mean 0 and variance 0.01^2
-        # this function runs in torch no grad
-        nn.init.normal_(self.latents.weight.data, 0.0, sigma)
-
-    def forward(self, image_indices, coords):
-        # 1. Lookup z_i for this batch of pixels
-        z_batch = self.latents(image_indices)
-
-        # 2. Feed (z, coords) to MLP
-        pred_pixel_vals = self.decoder(coords, z_batch)
-
-        return pred_pixel_vals, z_batch
-
-
-# ================= New wrapper for multi resolution BRRRR =================
-# Mainly the same as before but with that thing in him
-# Feel free to cleen the code/comments etc as always
-
-class AutoDecoderCNNWrapper(nn.Module):
-    def __init__(self, num_images, latent_spatial_dim=8, latent_channels=32, latent_dim=32, hidden_dim=256, out_channels=1, coord_size=2, pos_encoder=None, sigma=1e-4):
-        super().__init__()
-        self.decoder = DeepSDFNet(latent_dim=latent_dim, hidden_dim=hidden_dim, out_channels=out_channels, coord_size=coord_size, pos_encoder=pos_encoder)
+        self.latent_spatial_dim = latent_spatial_dim
+        self.latent_channels = latent_channels
+        self.latent_feature_dim = latent_feature_dim
 
         # Instead of nn.Embedding, we create a 4D Parameter Tensor
         # Shape: (N_Images, channels, height (s), width (s))
-        # like -> (5, 32, 8, 8) (in the paper s <-> latent_spatial_dim; c <-> latent_channels; C <-> latent_dim (modulated latent channel))
+        # like -> (5, 32, 8, 8) (in the paper s <-> latent_spatial_dim; c <-> latent_channels; C <-> latent_feature_dim)
         self.latents = nn.Parameter(
             torch.zeros(num_images, latent_channels, latent_spatial_dim, latent_spatial_dim)
         )
@@ -180,8 +155,17 @@ class AutoDecoderCNNWrapper(nn.Module):
         # Initialize with Gaussian prior (just like DeepSDF)
         nn.init.normal_(self.latents, 0.0, sigma)
 
-        # This gives structure to the latent space (simple conv layer, [TODO] try with a 1x1 conv and same size for c and C)
-        self.conv = nn.Conv2d(latent_channels, latent_dim, kernel_size=3, padding=1)
+        # This gives structure to the latent space via a shared conv layer.
+        if latent_spatial_dim == 1 and latent_channels != latent_feature_dim:
+            raise ValueError(
+                "latent_feature_dim must match latent_channels when latent_spatial_dim=1 "
+                "because the conv is disabled."
+            )
+        self.conv = (
+            nn.Conv2d(latent_channels, latent_feature_dim, kernel_size=3, padding=1)
+            if latent_spatial_dim != 1
+            else nn.Identity()
+        )
 
     def forward(self, image_indices, coords):
 
@@ -192,26 +176,29 @@ class AutoDecoderCNNWrapper(nn.Module):
 
         # -> ADD SPATIAL STRUCTURE
         # Apply the shared convolution, mixes information locally
-        # Shape: (Batch, latent_dim, s, s) bc 3x3 conv with 1 padding (so w,h doesn't change, only channels)
+        # Shape: (Batch, latent_feature_dim, s, s) bc 3x3 conv with 1 padding (so w,h doesn't change, only channels)
         modulated_grids = self.conv(current_grids)
 
-        # -> INTERPOLATE (bilinear interpolation of the latents, given the coords to sample from the grid)
-        # need to find the feature vector at exact position (x,y)
+        if self.latent_spatial_dim == 1:
+            # Single latent vector per image: recover the classic behavior
+            z_batch = modulated_grids.squeeze(-1).squeeze(-1)
+        else:
+            # -> INTERPOLATE (bilinear interpolation of the latents, given the coords to sample from the grid)
 
-        # Reshape coords for grid_sample: (Batch, 1, 1, 2) (-> expected shape, see grid_sample documentation)
-        sample_coords = coords.view(-1, 1, 1, 2)
+            # need to find the feature vector at exact position (x,y)
+            # Reshape coords for grid_sample: (Batch, 1, 1, 2) (-> expected shape, see grid_sample documentation)
+            sample_coords = coords.view(-1, 1, 1, 2)
 
-        # Sample features: Output shape (Batch, latent_dim, 1, 1)
-        z_features = F.grid_sample(modulated_grids, sample_coords, align_corners=True) # align corner useful given that we used linspace for coords (see documentation)
+            # Sample features: Output shape (Batch, latent_feature_dim, 1, 1)
+            # align_corners=True matches the [-1, 1] coordinate grid used in the dataset.
+            z_features = F.grid_sample(
+                modulated_grids, sample_coords, align_corners=True
+            )
 
-        # Flatten: (Batch, latent_dim)
-        z_batch = z_features.view(z_features.shape[0], -1)
+            # Flatten: (Batch, latent_feature_dim)
+            z_batch = z_features.view(z_features.shape[0], -1)
 
-        ### LEGACY modified ###
-        # 1. Lookup z_i for this batch of pixels
-        # (done, it's in  z_batch)
-
-        # 2. Feed (z, coords) to MLP
+        # Feed (z, coords) to MLP
         pred_pixel_vals = self.decoder(coords, z_batch)
 
         return pred_pixel_vals, z_batch
