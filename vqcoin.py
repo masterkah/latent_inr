@@ -321,7 +321,7 @@ class VQINR(nn.Module):
                  commitment_cost: float = 0.25,
                  num_latent_vectors: int = 4,  # Number of residual VQ stages per image
                  num_images: int = 1,  # Number of images to encode
-                 num_freqs: int = 10,  # Number of frequencies for positional encoding (important for ReLU)
+                 num_freqs: int = 25,  # Number of frequencies for positional encoding (important for ReLU)
                  activation: str = 'relu',  # 'siren' or 'relu'
                  **kwargs):
         super().__init__()
