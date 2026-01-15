@@ -105,7 +105,7 @@ class PositionalEncoding(nn.Module):
         super().__init__()
         self.num_freqs = num_freqs
         self.include_input = include_input
-        freqs = 2.0 ** torch.arange(num_freqs)
+        freqs = 2 ** torch.linspace(0, num_freqs - 1, num_freqs) * 0.5
         self.register_buffer('freqs', freqs)
 
     def forward(self, x):
@@ -191,7 +191,7 @@ class VQINR(nn.Module):
         self.coord_dim = coord_dim
         self.latent_dim = latent_dim
         self.num_latent_vectors = num_latent_vectors
-        self.latents = nn.Parameter(torch.randn(num_images, num_latent_vectors, latent_dim))
+        self.latents = nn.Parameter(torch.randn(num_images, latent_dim))
         self.vq_layers = nn.ModuleList([
             EMAVectorQuantizer(num_codes=num_codes, code_dim=latent_dim, commitment_cost=commitment_cost)
             for _ in range(num_latent_vectors)
@@ -210,16 +210,20 @@ class VQINR(nn.Module):
         img_latents = self.latents[latent_indices]
         
         # ✅ True Residual Quantization (Coin++ / RVQ)
-        z = img_latents.sum(dim=1)  # Combine all latents into target
+        z = img_latents
         residual = z
         z_q_sum = torch.zeros_like(z)
         total_vq_loss = 0.0
+        all_indices = []
         
         for stage_idx in range(self.num_latent_vectors):
-            z_q_stage, _, vq_loss = self.vq_layers[stage_idx](residual)
+            z_q_stage, indices, vq_loss = self.vq_layers[stage_idx](residual)
+            all_indices.append(indices)
             z_q_sum = z_q_sum + z_q_stage
             residual = (residual - z_q_stage).detach()  # 🔴 Core: residual from quantization error only
             total_vq_loss += vq_loss
+        
+        total_vq_loss = total_vq_loss / self.num_latent_vectors
         
         total_vq_loss = total_vq_loss / self.num_latent_vectors
         
@@ -227,10 +231,10 @@ class VQINR(nn.Module):
         # Gradually unlock more VQ information as training progresses
         effective_z = z_q_sum
         if self.training:
-            # Progressive unlocking: scale VQ contribution based on training progress
+            # Progressive unlocking: scale gradient instead of value (Coin++ style)
             warmup_epochs = 2000  # Full VQ info available after 2000 epochs
             scale = min(1.0, self.current_epoch / warmup_epochs)
-            effective_z = z_q_sum * scale
+            effective_z = z_q_sum * scale + z_q_sum.detach() * (1 - scale)
         
         betas = [layer(effective_z) for layer in self.modulation_layers]
         betas_expanded = []
@@ -240,7 +244,7 @@ class VQINR(nn.Module):
         coords_flat = coords.reshape(-1, self.coord_dim)
         coords_enc = self.pos_enc(coords_flat)
         values_flat = self.decoder(coords_enc, betas=betas_expanded)
-        return values_flat.view(batch_size, num_points, -1), None, total_vq_loss
+        return values_flat.view(batch_size, num_points, -1), all_indices, total_vq_loss
 
     @torch.no_grad()
     def get_image(self, resolution, latent_idx, device):
@@ -303,7 +307,10 @@ class MultiImageINRModule(pl.LightningModule):
         # track_indices: {'breast': [0,1,2], 'retina': [50,51,52], ...}
         self.track_indices = track_indices 
         # 存储历史记录: {epoch: {global_idx: image_tensor}}
-        self.history = {} 
+        self.history = {}
+        # For usage tracking
+        self.usage_counts = [torch.zeros(NUM_CODES, dtype=torch.long) for _ in range(NUM_LATENT_VECTORS)]
+        self.print_interval = 100  # Print every 100 epochs 
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.network.parameters(), lr=self.lr)
@@ -313,13 +320,20 @@ class MultiImageINRModule(pl.LightningModule):
         self.network.current_epoch = self.current_epoch
         
         coords, values, img_indices, masks = batch
-        outputs, _, vq_loss = self.network(coords, latent_indices=img_indices)
+        outputs, indices_list, vq_loss = self.network(coords, latent_indices=img_indices)
         masks_expanded = masks.unsqueeze(1).expand_as(outputs)
         loss_sq = (outputs - values) ** 2
         recon_loss = (loss_sq * masks_expanded).mean()
         loss = recon_loss + vq_loss
         self.log('train/recon_loss', recon_loss, prog_bar=True)
         self.log('train/vq_loss', vq_loss, prog_bar=True)
+        
+        # Accumulate usage counts every print_interval epochs
+        if self.current_epoch % self.print_interval == 0:
+            for i, indices in enumerate(indices_list):
+                usage = torch.bincount(indices, minlength=NUM_CODES)
+                self.usage_counts[i] += usage
+        
         return loss
 
     @torch.no_grad()
@@ -370,6 +384,14 @@ class MultiImageINRModule(pl.LightningModule):
         epoch_num = self.current_epoch + 1
         if epoch_num in self.vis_intervals:
             self.save_snapshots(epoch_num)
+        
+        # Print usage every print_interval epochs
+        if self.current_epoch % self.print_interval == 0:
+            print(f"\n[Epoch {self.current_epoch}] Code Usage:")
+            for i, count in enumerate(self.usage_counts):
+                print(f"  Stage {i}: {count}")
+            # Reset counts
+            self.usage_counts = [torch.zeros(NUM_CODES, dtype=torch.long) for _ in range(NUM_LATENT_VECTORS)]
 
 # ==========================================
 # 7. Main
