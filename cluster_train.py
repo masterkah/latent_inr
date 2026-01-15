@@ -65,7 +65,7 @@ torch.set_float32_matmul_precision('high')
 VISUALIZATION_INTERVALS = [0, 1000, 3000, 5000, 7500, 10000]
 
 # --- 核心重建质量参数 ---
-NUM_FREQS = 24           
+NUM_FREQS = 15           
 LATENT_DIM = 64          
 NUM_CODES = 256        
 NUM_LATENT_VECTORS = 4   
@@ -202,29 +202,37 @@ class VQINR(nn.Module):
         self.pos_enc = PositionalEncoding(num_freqs)
         decoder_in_dim = coord_dim + coord_dim * 2 * num_freqs
         self.decoder = ModulatedReLU(decoder_in_dim, value_dim, hidden_size, num_layers)
+        self.current_epoch = 0  # Track training progress for progressive decoding
 
     def forward(self, coords, latent_indices):
         batch_size = coords.shape[0]
         num_points = coords.shape[1]
-        img_latents = self.latents[latent_indices] 
-        z_q_sum = torch.zeros(batch_size, self.latent_dim, device=coords.device, dtype=img_latents.dtype)
-        residual_target = torch.zeros(batch_size, self.latent_dim, device=coords.device, dtype=img_latents.dtype)
+        img_latents = self.latents[latent_indices]
+        
+        # ✅ True Residual Quantization (Coin++ / RVQ)
+        z = img_latents.sum(dim=1)  # Combine all latents into target
+        residual = z
+        z_q_sum = torch.zeros_like(z)
         total_vq_loss = 0.0
         
         for stage_idx in range(self.num_latent_vectors):
-            z_stage = img_latents[:, stage_idx, :]
-            if stage_idx == 0:
-                residual_target = z_stage
-                z_current = z_stage
-            else:
-                residual_target = residual_target + z_stage
-                z_current = residual_target - z_q_sum.detach()
-            z_q_stage, _, vq_loss = self.vq_layers[stage_idx](z_current)
+            z_q_stage, _, vq_loss = self.vq_layers[stage_idx](residual)
             z_q_sum = z_q_sum + z_q_stage
+            residual = (residual - z_q_stage).detach()  # 🔴 Core: residual from quantization error only
             total_vq_loss += vq_loss
         
         total_vq_loss = total_vq_loss / self.num_latent_vectors
-        betas = [layer(z_q_sum) for layer in self.modulation_layers]
+        
+        # ✅ Progressive Decoder Modulation
+        # Gradually unlock more VQ information as training progresses
+        effective_z = z_q_sum
+        if self.training:
+            # Progressive unlocking: scale VQ contribution based on training progress
+            warmup_epochs = 2000  # Full VQ info available after 2000 epochs
+            scale = min(1.0, self.current_epoch / warmup_epochs)
+            effective_z = z_q_sum * scale
+        
+        betas = [layer(effective_z) for layer in self.modulation_layers]
         betas_expanded = []
         for beta in betas:
             beta_exp = beta.unsqueeze(1).expand(-1, num_points, -1).reshape(-1, beta.shape[-1])
@@ -301,6 +309,9 @@ class MultiImageINRModule(pl.LightningModule):
         return torch.optim.Adam(self.network.parameters(), lr=self.lr)
     
     def training_step(self, batch, batch_idx):
+        # Update network's current epoch for progressive decoding
+        self.network.current_epoch = self.current_epoch
+        
         coords, values, img_indices, masks = batch
         outputs, _, vq_loss = self.network(coords, latent_indices=img_indices)
         masks_expanded = masks.unsqueeze(1).expand_as(outputs)
