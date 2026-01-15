@@ -1,3 +1,51 @@
+import os
+import subprocess
+import sys
+
+# ==========================================
+# 自动寻找空闲 GPU (必须放在所有 Torch 操作之前)
+# ==========================================
+def auto_select_gpu():
+    try:
+        # 如果用户已经手动指定了，就不自动选了
+        if "CUDA_VISIBLE_DEVICES" in os.environ:
+            print(f"Using manually set CUDA_VISIBLE_DEVICES={os.environ['CUDA_VISIBLE_DEVICES']}")
+            return
+
+        cmd = "nvidia-smi --query-gpu=index,memory.free,utilization.gpu --format=csv,nounits,noheader"
+        result = subprocess.check_output(cmd.split(), encoding='utf-8')
+        
+        lines = result.strip().split('\n')
+        best_gpu = -1
+        max_free = 0
+        
+        print("Scanning GPUs...")
+        for line in lines:
+            try:
+                idx, free_mem, util = line.split(', ')
+                idx, free_mem, util = int(idx), int(free_mem), int(util)
+                print(f"  GPU {idx}: Free Memory: {free_mem}MiB, Utilization: {util}%")
+                
+                # 策略：优先找利用率 < 5% 且显存剩余最大的
+                if util < 5 and free_mem > max_free:
+                    max_free = free_mem
+                    best_gpu = idx
+            except:
+                continue
+        
+        if best_gpu != -1:
+            print(f"\n✅ Auto-selected GPU {best_gpu} (Free: {max_free}MiB)")
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(best_gpu)
+        else:
+            print("⚠️ No ideal GPU found, using default strategy (likely GPU 0).")
+            
+    except Exception as e:
+        print(f"⚠️ GPU auto-selection failed: {e}")
+
+# 执行自动选择
+auto_select_gpu()
+
+# ... 下面才是 import torch 和其他代码 ...
 import torch
 from torch import nn
 from torch.utils.data import Dataset, DataLoader
@@ -6,15 +54,13 @@ import lightning as pl
 import numpy as np
 import random
 import matplotlib.pyplot as plt
-import os
 import math
 from torchvision.transforms.functional import pil_to_tensor
 from medmnist import BreastMNIST, RetinaMNIST, PneumoniaMNIST
 
 # ==========================================
-# 0. 硬件加速设置 (必须放在最前面)
+# 0. 硬件加速设置
 # ==========================================
-# 开启 TensorFloat-32 (H100 核心加速开关，速度提升 3-5 倍)
 torch.set_float32_matmul_precision('high')
 
 # ==========================================
@@ -22,35 +68,32 @@ torch.set_float32_matmul_precision('high')
 # ==========================================
 
 # --- 核心重建质量参数 ---
-NUM_FREQS = 24           # [关键超参数] 位置编码频率数 (ReLU Frequency)
-                         # 作用：控制模型能捕捉的细节精细度
-                         # 建议范围：20 ~ 30。设为 10 会模糊，设为 40+ 可能有噪点。
-
-LATENT_DIM = 64          # 潜向量维度 (控制每个向量的信息量)
-NUM_CODES = 1024         # 码本大小 (Codebook Size，越大越不容易过拟合)
-NUM_LATENT_VECTORS = 4   # Residual VQ 的层数 (每张图用几个向量叠加表示)
+NUM_FREQS = 24           
+LATENT_DIM = 64          
+NUM_CODES = 512        
+NUM_LATENT_VECTORS = 4   
 
 # --- 训练配置 ---
-BATCH_SIZE = 150         # H100 显存巨大，直接填满 (建议等于总图片数，实现 Full Batch)
-EPOCHS = 10000           # 训练轮数 (H100 跑得快，1万轮很快)
-LR = 1e-3                # 学习率
-SEED = 42                # 随机种子
+BATCH_SIZE = 64         
+EPOCHS = 10000           
+LR = 1e-4                
+SEED = 42                
 
 # --- 模型架构参数 ---
-HIDDEN_SIZE = 256        # MLP 宽度 (H100 上建议 256 或 512)
-NUM_LAYERS = 4           # MLP 深度
-COORD_DIM = 2            # 坐标维度 (x, y)
-VALUE_DIM = 3            # 输出维度 (RGB)
-COMMITMENT_COST = 0.25   # VQ Loss 的权重
+HIDDEN_SIZE = 256        
+NUM_LAYERS = 3           
+COORD_DIM = 2            
+VALUE_DIM = 3            
+COMMITMENT_COST = 0.25   
 
 # --- 数据集配置 ---
-IMAGE_SIZE = 64          # 图片分辨率
-NUM_IMAGES_PER_DS = 50   # 每个数据集采样多少张图
-NUM_WORKERS = 8          # DataLoader 进程数
+IMAGE_SIZE = 64          
+NUM_IMAGES_PER_DS = 50   
+NUM_WORKERS = 8          
 
 # --- 输出配置 ---
 RESULTS_DIR = 'results_h100'
-EVAL_INTERVAL = 500      # 每多少个 Epoch 验证一次
+# EVAL_INTERVAL = 1 # 我们在代码里直接改成了每个 epoch 打印
 
 # ==========================================
 # 2. 基础模块 (Layers & VQ)
@@ -68,18 +111,14 @@ class PositionalEncoding(nn.Module):
         super().__init__()
         self.num_freqs = num_freqs
         self.include_input = include_input
-        # 使用 2^0 到 2^(N-1) 的频率
         freqs = 2.0 ** torch.arange(num_freqs)
         self.register_buffer('freqs', freqs)
 
     def forward(self, x):
-        # x: (..., D)
         embed = [x] if self.include_input else []
-        # (..., D, 1) * (Freqs) -> (..., D, F)
         x_expanded = x.unsqueeze(-1) * self.freqs * torch.pi
         sin_x = torch.sin(x_expanded)
         cos_x = torch.cos(x_expanded)
-        # Flatten: (..., D * F * 2)
         embed.append(sin_x.reshape(x.shape[0], -1))
         embed.append(cos_x.reshape(x.shape[0], -1))
         return torch.cat(embed, dim=-1)
@@ -163,40 +202,31 @@ class VQINR(nn.Module):
         self.latent_dim = latent_dim
         self.num_latent_vectors = num_latent_vectors
         
-        # Latents & VQ
         self.latents = nn.Parameter(torch.randn(num_images, num_latent_vectors, latent_dim))
         self.vq_layers = nn.ModuleList([
             EMAVectorQuantizer(num_codes=num_codes, code_dim=latent_dim, commitment_cost=commitment_cost)
             for _ in range(num_latent_vectors)
         ])
         
-        # Modulation
         self.modulation_layers = nn.ModuleList([
             nn.Linear(latent_dim, hidden_size) for _ in range(num_layers)
         ])
         
-        # Positional Encoding (控制清晰度的关键)
         self.pos_enc = PositionalEncoding(num_freqs)
-        # 输入维度 = 原始维度(2) + sin/cos * 频率数 * 原始维度(2)
         decoder_in_dim = coord_dim + coord_dim * 2 * num_freqs
         
         self.decoder = ModulatedReLU(decoder_in_dim, value_dim, hidden_size, num_layers)
 
     def forward(self, coords, latent_indices):
-        """
-        coords: (B, Points, 2)
-        latent_indices: (B,) 
-        """
         batch_size = coords.shape[0]
         num_points = coords.shape[1]
         
-        img_latents = self.latents[latent_indices] # (B, stages, dim)
+        img_latents = self.latents[latent_indices] 
         
         z_q_sum = torch.zeros(batch_size, self.latent_dim, device=coords.device)
         residual_target = torch.zeros(batch_size, self.latent_dim, device=coords.device)
         total_vq_loss = 0.0
         
-        # Residual VQ 循环
         for stage_idx in range(self.num_latent_vectors):
             z_stage = img_latents[:, stage_idx, :]
             
@@ -213,13 +243,11 @@ class VQINR(nn.Module):
             
         betas = [layer(z_q_sum) for layer in self.modulation_layers]
         
-        # Expand Betas: (B, dim) -> (B*Points, dim)
         betas_expanded = []
         for beta in betas:
             beta_exp = beta.unsqueeze(1).expand(-1, num_points, -1).reshape(-1, beta.shape[-1])
             betas_expanded.append(beta_exp)
             
-        # Flatten coords & Decode
         coords_flat = coords.reshape(-1, self.coord_dim)
         coords_enc = self.pos_enc(coords_flat)
         values_flat = self.decoder(coords_enc, betas=betas_expanded)
@@ -249,7 +277,6 @@ class FullImageDataset(Dataset):
         print("Preprocessing images to RAM (Full Grid)...")
         for img in images:
             h, w, c = img.shape
-            # Padding
             if c == 1:
                 zeros = torch.zeros(h, w, 2, dtype=img.dtype)
                 img_padded = torch.cat([img, zeros], dim=-1)
@@ -258,7 +285,6 @@ class FullImageDataset(Dataset):
                 img_padded = img
                 mask = torch.tensor([1.0, 1.0, 1.0], dtype=torch.float32)
             
-            # Grid
             y = torch.linspace(-1, 1, h)
             x = torch.linspace(-1, 1, w)
             yy, xx = torch.meshgrid(y, x, indexing='ij')
@@ -279,12 +305,11 @@ class FullImageDataset(Dataset):
 # ==========================================
 
 class MultiImageINRModule(pl.LightningModule):
-    def __init__(self, network, gt_images, lr, eval_interval):
+    def __init__(self, network, gt_images, lr):
         super().__init__()
         self.network = network
         self.lr = lr
         self.gt_images = [t.detach().cpu() for t in gt_images]
-        self.eval_interval = eval_interval
         
     def configure_optimizers(self):
         return torch.optim.Adam(self.network.parameters(), lr=self.lr)
@@ -304,14 +329,19 @@ class MultiImageINRModule(pl.LightningModule):
         return loss
 
     def on_train_epoch_end(self):
-        if (self.current_epoch + 1) % self.eval_interval == 0:
-            idx = 0
-            gt = self.gt_images[idx].to(self.device)
-            H, W, C_orig = gt.shape
-            pred_full = self.network.get_image((H, W), idx, self.device)
-            pred = pred_full[..., :C_orig]
-            score = psnr(pred, gt)
-            self.log('val/psnr_img0', score, prog_bar=True)
+        # 1. 计算第一张图的 PSNR
+        idx = 0
+        gt = self.gt_images[idx].to(self.device)
+        H, W, C_orig = gt.shape
+        pred_full = self.network.get_image((H, W), idx, self.device)
+        pred = pred_full[..., :C_orig]
+        score = psnr(pred, gt)
+        
+        # 2. 打印到控制台 (进度条)
+        print(f"\n[Epoch {self.current_epoch}] Img 0 PSNR: {score:.2f} dB")
+        
+        # 3. 记录日志 (让它显示在进度条右侧)
+        self.log('val/psnr', score, prog_bar=True)
 
 # ==========================================
 # 6. Main
@@ -339,7 +369,6 @@ if __name__ == "__main__":
             
     print(f"Total training images: {len(all_images_original)}")
     
-    # --- 1. 数据准备 ---
     dataset = FullImageDataset(all_images_original)
     dataloader = DataLoader(
         dataset, 
@@ -350,7 +379,6 @@ if __name__ == "__main__":
         drop_last=False
     )
     
-    # --- 2. 模型初始化 (参数来自顶部配置) ---
     vqinr = VQINR(
         coord_dim=COORD_DIM, 
         value_dim=VALUE_DIM,
@@ -360,23 +388,20 @@ if __name__ == "__main__":
         num_layers=NUM_LAYERS,
         num_latent_vectors=NUM_LATENT_VECTORS,
         num_images=len(all_images_original),
-        num_freqs=NUM_FREQS, # <--- 传入超参数
+        num_freqs=NUM_FREQS, 
         commitment_cost=COMMITMENT_COST
     )
     
-    # Kaiming 初始化
     with torch.no_grad():
         for m in vqinr.decoder.modules():
             if isinstance(m, nn.Linear):
                 nn.init.kaiming_normal_(m.weight)
                 if m.bias is not None: m.bias.data.fill_(0)
     
-    # --- 3. 编译模型 ---
     print("Compiling model for H100 acceleration...")
     vqinr.decoder = torch.compile(vqinr.decoder, mode="reduce-overhead")
     
-    # --- 4. 训练 ---
-    module = MultiImageINRModule(vqinr, all_images_original, lr=LR, eval_interval=EVAL_INTERVAL)
+    module = MultiImageINRModule(vqinr, all_images_original, lr=LR)
     
     trainer = pl.Trainer(
         max_epochs=EPOCHS,
@@ -392,7 +417,6 @@ if __name__ == "__main__":
     print(f"Hyperparameters: Batch={BATCH_SIZE}, Freqs={NUM_FREQS}, Hidden={HIDDEN_SIZE}, Codes={NUM_CODES}")
     trainer.fit(module, dataloader)
     
-    # --- 5. 保存结果 ---
     print("\nTraining done. Saving results...")
     os.makedirs(RESULTS_DIR, exist_ok=True)
     vqinr.eval()
@@ -401,8 +425,6 @@ if __name__ == "__main__":
         fig, axes = plt.subplots(2, 10, figsize=(20, 5))
         for i in range(10):
             if i >= len(all_images_original): break
-            
-            # GT
             gt = all_images_original[i]
             if gt.shape[-1] == 1:
                 axes[0, i].imshow(gt.squeeze(), cmap='gray')
@@ -411,7 +433,6 @@ if __name__ == "__main__":
             axes[0, i].axis('off')
             axes[0, i].set_title("GT")
             
-            # Pred
             pred_full = vqinr.get_image(gt.shape[:-1], i, module.device)
             if gt.shape[-1] == 1:
                 pred = pred_full[..., 0:1]
