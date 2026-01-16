@@ -26,7 +26,7 @@ Key knobs:
 - `LATENT_FEATURE_DIM`: decoder input width after the conv (fixed for fair `s` comparisons).
   For `s>1`, a shared 3x3 conv is applied to each image's latent grid before sampling per-pixel latents;
   for `s=1`, the conv is disabled and the model reduces to a single latent vector per image.
-- `NUM_EPOCHS`, `BATCH_SIZE`, `VIZ_INTERVAL`, `NUM_WORKERS`, and dataset settings.
+- `NUM_EPOCHS`, `BATCH_SIZE`, `VIZ_INTERVAL` (epochs), `NUM_WORKERS`, and dataset settings.
 
 ### Running
 
@@ -39,7 +39,7 @@ python train.py -config config/latent_size_only_3000.json -output-folder "experi
 Flags:
 
 - `-config` (required): path to the JSON config.
-- `-debug` (default: `0`): `1` logs every 100 steps; `0` logs at `VIZ_INTERVAL`.
+- `-debug` (default: `0`): `1` logs every epoch; `0` logs at `VIZ_INTERVAL` epochs.
 - `-use-amp-tf32` (default: `1`): enables AMP/TF32 when CUDA is available.
 - `-output-folder` (default: `.`): base folder for all outputs.
 
@@ -48,12 +48,12 @@ Flags:
 Each `(latent_size, s)` pair gets its own run folder:
 
 - `run_latent_<size>_s<s>/config.json`
-- reconstructions: `recons_refs_step_<step>.png`
-- t-SNE: `tsne_2d_step_<step>.png`
+- reconstructions: `recons_refs_epoch_<epoch>.png`
+- t-SNE: `tsne_2d_epoch_<epoch>.png`
 
 Summary plots in the output folder:
 
 - `latent_size_comparison_sweep.png` (only when `LATENT_SPATIAL_DIMS` is `[1]`)
-- `latent_all_runs_psnr_steps.png` (when `LATENT_SPATIAL_DIMS` is not `[1]`)
+- `latent_all_runs_psnr_epochs.png` (when `LATENT_SPATIAL_DIMS` is not `[1]`)
 - `latent_size_<size>_spatial_sweep.png` (when `LATENT_SPATIAL_DIMS` is not `[1]`)
 - `latent_spatial_comparison.png` (when `LATENT_SPATIAL_DIMS` is not `[1]`)

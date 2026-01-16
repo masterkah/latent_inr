@@ -71,11 +71,13 @@ def reconstruct_single_image(model, img_idx, dataset, device, batch_size=4096):
         # Process in chunks to prevent GPU out-of-memory on large grids
         for i in range(0, total_pixels, batch_size):
             # 1. Prepare Chunk
-            coord_chunk = all_coords[i : i+batch_size]
+            coord_chunk = all_coords[i : i + batch_size]
             chunk_len = coord_chunk.shape[0]
 
             # 2. Prepare Indices (All same image index)
-            idx_chunk = torch.full((chunk_len,), img_idx, dtype=torch.long, device=device)
+            idx_chunk = torch.full(
+                (chunk_len,), img_idx, dtype=torch.long, device=device
+            )
 
             # 3. Model Forward
             # Works for both Spatial (AutoDecoderCNN) and Vector (Standard) models
@@ -85,6 +87,7 @@ def reconstruct_single_image(model, img_idx, dataset, device, batch_size=4096):
 
     # Concatenate all chunks back into one big vector, preserving dataset coord order.
     return torch.cat(pred_chunks, dim=0)
+
 
 def evaluate_dataset_psnr(model, dataset, device):
     psnr_dict = {}
@@ -104,6 +107,7 @@ def evaluate_dataset_psnr(model, dataset, device):
 
     model.train()  # return to training mode after evaluation
     return psnr_dict
+
 
 #  --------------------- Plotting & Saving ---------------------
 
@@ -128,7 +132,7 @@ def _select_reference_indices(dataset, max_per_dataset):
 
 
 def save_reference_reconstructions(
-    model, dataset, step, run_folder, device, max_per_dataset=5
+    model, dataset, epoch, run_folder, device, max_per_dataset=5
 ):
     """
     Save side-by-side GT/reconstruction pairs for up to `max_per_dataset` images
@@ -161,14 +165,14 @@ def save_reference_reconstructions(
     batch_tensor = torch.stack(img_list)
     grid_img = make_grid(batch_tensor, nrow=5, padding=2)
 
-    save_image(grid_img, os.path.join(run_folder, f"recons_refs_step_{step}.png"))
+    save_image(grid_img, os.path.join(run_folder, f"recons_refs_epoch_{epoch}.png"))
     model.train()  # return to training mode after evaluation
 
 
 def plot_tsne(
     model,
     dataset,
-    step,
+    epoch,
     run_folder,
     expected_num_clusters=1,
 ):
@@ -189,8 +193,8 @@ def plot_tsne(
             - H,W : height/width
             - C   : number of channels
             - flat_pixels: (K, H*W, C) tensor in [0, 1]
-    step: int
-        Current training step (only used for the filename).
+    epoch: int
+        Current epoch index (only used for the filename).
     run_folder: str
         Where to store the PNG.
     expected_num_clusters: int, optional
@@ -359,6 +363,6 @@ def plot_tsne(
         )
 
     fig.tight_layout()
-    filename = f"tsne_2d_step_{step}.png"
+    filename = f"tsne_2d_epoch_{epoch}.png"
     fig.savefig(os.path.join(run_folder, filename))
     plt.close(fig)

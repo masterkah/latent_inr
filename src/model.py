@@ -26,23 +26,12 @@ class DeepSDFNet(nn.Module):
         self.input_dim = latent_dim + extra_size
         self.pos_encoder = pos_encoder
 
-        # Decide where to apply the skip connection relative to depth.
-        interior_layers = max(1, num_layers - 2)  # ModuleList length
-        # Place skip concat around the middle of the MLP depth.
-        self.skip_concat_idx = max(1, interior_layers // 2 + 1)
-
         # In the paper they use 8 fully connected layers with weight norm.
         self.layer_0 = param_weight_norm(nn.Linear(self.input_dim, hidden_dim))
 
         self.layers = nn.ModuleList()
         for i in range(1, num_layers - 1):
-            input_size = (
-                hidden_dim + self.input_dim if i == self.skip_concat_idx else hidden_dim
-            )
-            output_size = hidden_dim
-
-            self.layers.append(param_weight_norm(nn.Linear(input_size, output_size)))
-            print(f"layer {i} added in:{input_size} out:{output_size}")  # debug info
+            self.layers.append(param_weight_norm(nn.Linear(hidden_dim, hidden_dim)))
 
         # Output layer: Projects to 1 channel (Grayscale) or 3 (RGB)
         self.last_layer = nn.Linear(hidden_dim, out_channels)
@@ -69,11 +58,7 @@ class DeepSDFNet(nn.Module):
         x = self.relu(x)
         x = self.dropout(x)
 
-        for i, layer in enumerate(self.layers, 1):
-            # "Skip connection" logic (we cat the layer with the input)
-            if i == self.skip_concat_idx:
-                x = torch.cat([x, model_input], dim=1)
-
+        for layer in self.layers:
             x = layer(x)
             x = self.relu(x)
             x = self.dropout(x)
@@ -116,6 +101,7 @@ class FourierFeatures(nn.Module):
 # ================= Multi-resolution wrapper =================
 # Spatial latents that can recover classic single-vector behavior when s=1.
 
+
 class AutoDecoderCNNWrapper(nn.Module):
     def __init__(
         self,
@@ -149,7 +135,9 @@ class AutoDecoderCNNWrapper(nn.Module):
         # Shape: (N_Images, channels, height (s), width (s))
         # like -> (5, 32, 8, 8) (in the paper s <-> latent_spatial_dim; c <-> latent_channels; C <-> latent_feature_dim)
         self.latents = nn.Parameter(
-            torch.zeros(num_images, latent_channels, latent_spatial_dim, latent_spatial_dim)
+            torch.zeros(
+                num_images, latent_channels, latent_spatial_dim, latent_spatial_dim
+            )
         )
 
         # Initialize with Gaussian prior (just like DeepSDF)

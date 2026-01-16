@@ -2,14 +2,10 @@
   "K_IMAGES": 3000,
   "IMAGE_SIZE": 64,
   "BATCH_SIZE": 32768,
-  "DATASET_NAMES": [
-    "pneumoniamnist",
-    "pathmnist",
-    "bloodmnist"
-  ],
+  "DATASET_NAMES": ["pneumoniamnist", "pathmnist", "bloodmnist"],
   "INIT_SIGMA": 0.01,
   "NUM_EPOCHS": 1000,
-  "VIZ_INTERVAL": 3750,
+  "VIZ_INTERVAL": 10,
   "DECODER_LR": 1e-5,
   "LATENT_LR": 5e-3,
   "HIDDEN_DIM": 512,
@@ -19,17 +15,8 @@
   "FF_SCALE": 1.25,
   "SEED": 42,
   "LATENT_FEATURE_DIM": null,
-  "LATENT_SIZES": [
-    16,
-    32,
-    64,
-    128,
-    256,
-    512
-  ],
-  "LATENT_SPATIAL_DIMS": [
-    1
-  ],
+  "LATENT_SIZES": [16, 32, 64, 128, 256, 512],
+  "LATENT_SPATIAL_DIMS": [1],
   "NUM_WORKERS": 8,
   "PERSISTENT_WORKERS": true,
   "PREFETCH_FACTOR": 2
