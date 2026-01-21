@@ -8,3 +8,4 @@ experiments/
 results/
 lightning_logs/
 .venv/
+others/
