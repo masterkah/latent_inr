@@ -89,7 +89,9 @@ def create_model(config, num_images):
         num_layers=config['NUM_LAYERS'],
         num_latent_vectors=config['NUM_LATENT_VECTORS'],
         num_images=num_images,
-        commitment_cost=config['COMMITMENT_COST']
+        commitment_cost=config['COMMITMENT_COST'],
+        activation=config.get('ACTIVATION', 'siren'),  # Default to 'siren' if not specified
+        num_freqs=config.get('NUM_FREQS', 10)  # Positional encoding frequencies for ReLU
     )
     return model
 
@@ -138,7 +140,8 @@ def main():
         all_images_original,
         track_indices,
         visualization_intervals,
-        lr=config['LR']
+        lr=config['LR'],
+        grad_loss_weight=config.get('GRAD_LOSS_WEIGHT', 0.0)
     )
     
     # Create trainer

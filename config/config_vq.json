@@ -1,5 +1,6 @@
 {
   "NUM_FREQS": 15,
+  "ACTIVATION": "siren",
   "LATENT_DIM": 64,
   "NUM_CODES": 128,
   "NUM_LATENT_VECTORS": 4,

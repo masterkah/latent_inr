@@ -85,6 +85,111 @@ class ModulatedSiren(nn.Module):
         return self.last_layer(x)
 
 
+class PositionalEncoding(nn.Module):
+    """Fourier feature positional encoding for ReLU networks"""
+    def __init__(self, in_dim, num_freqs):
+        super().__init__()
+        self.num_freqs = num_freqs
+        self.in_dim = in_dim
+        # Output dimension: in_dim + 2 * in_dim * num_freqs (original + sin + cos for each frequency)
+        self.out_dim = in_dim + 2 * in_dim * num_freqs
+        
+        # Frequency bands (learnable or fixed)
+        freq_bands = 2.0 ** torch.linspace(0, num_freqs - 1, num_freqs)
+        self.register_buffer('freq_bands', freq_bands)
+    
+    def forward(self, x):
+        """
+        Apply Fourier feature encoding
+        Args:
+            x: input coordinates [B, in_dim]
+        Returns:
+            encoded features [B, in_dim + 2*in_dim*num_freqs]
+        """
+        if self.num_freqs == 0:
+            return x
+        
+        # x: [B, in_dim]
+        encoded = [x]
+        for freq in self.freq_bands:
+            encoded.append(torch.sin(2 * np.pi * freq * x))
+            encoded.append(torch.cos(2 * np.pi * freq * x))
+        
+        return torch.cat(encoded, dim=-1)
+
+
+class ReLULayer(nn.Module):
+    """ReLU Layer with FiLM modulation capability"""
+    def __init__(self, in_features, out_features, bias=True):
+        super().__init__()
+        self.linear = nn.Linear(in_features, out_features, bias=bias)
+        # Xavier initialization for ReLU networks
+        nn.init.xavier_uniform_(self.linear.weight)
+        if bias:
+            nn.init.zeros_(self.linear.bias)
+    
+    def forward(self, x, gamma=None, beta=None):
+        """
+        Forward pass with optional FiLM modulation
+        Args:
+            x: input tensor
+            gamma: scaling factor for FiLM
+            beta: shift factor for FiLM
+        """
+        out = self.linear(x)
+        
+        # FiLM Modulation: out = (Wx+b) * (1+gamma) + beta
+        if gamma is not None and beta is not None:
+            out = out * (1 + gamma) + beta
+        elif beta is not None:
+            out = out + beta
+            
+        return F.relu(out)
+
+
+class ModulatedReLU(nn.Module):
+    """ReLU network with FiLM modulation and positional encoding capability"""
+    def __init__(self, in_dim, out_dim, hidden_dim, num_layers, num_freqs=10):
+        super().__init__()
+        self.net = nn.ModuleList()
+        
+        # Positional encoding (Fourier features)
+        self.pos_encoding = PositionalEncoding(in_dim, num_freqs)
+        encoded_dim = self.pos_encoding.out_dim
+        
+        # First Layer (Encoded Coords -> Hidden)
+        self.net.append(ReLULayer(encoded_dim, hidden_dim))
+        
+        # Hidden Layers (Hidden -> Hidden)
+        for _ in range(num_layers - 1):
+            self.net.append(ReLULayer(hidden_dim, hidden_dim))
+            
+        # Last Linear Layer (Hidden -> Value)
+        self.last_layer = nn.Linear(hidden_dim, out_dim)
+        nn.init.xavier_uniform_(self.last_layer.weight)
+        nn.init.zeros_(self.last_layer.bias)
+            
+    def forward(self, x, gammas=None, betas=None):
+        """
+        Forward pass with optional FiLM modulation parameters
+        Args:
+            x: input coordinates
+            gammas: list of gamma parameters for each layer
+            betas: list of beta parameters for each layer
+        """
+        # Apply positional encoding to input coordinates
+        x = self.pos_encoding(x)
+        
+        for i, layer in enumerate(self.net):
+            if i == 0:
+                x = layer(x, gamma=None, beta=None)  # First layer without FiLM
+            else:
+                g = gammas[i] if gammas is not None else None
+                b = betas[i] if betas is not None else None
+                x = layer(x, gamma=g, beta=b)
+        return self.last_layer(x)
+
+
 class EMAVectorQuantizer(nn.Module):
     """Exponential Moving Average Vector Quantizer"""
     def __init__(self, num_codes, code_dim, decay=0.99, epsilon=1e-5, commitment_cost=0.25):
@@ -144,15 +249,17 @@ class EMAVectorQuantizer(nn.Module):
 class VQINR(nn.Module):
     """
     Vector Quantized Implicit Neural Representation
-    Uses residual VQ with FiLM-conditioned SIREN decoder
+    Uses residual VQ with FiLM-conditioned decoder (SIREN or ReLU)
     """
     def __init__(self, coord_dim, value_dim, latent_dim, num_codes, hidden_size, 
-                 num_layers, num_latent_vectors, num_images, commitment_cost, **kwargs):
+                 num_layers, num_latent_vectors, num_images, commitment_cost, 
+                 activation='siren', **kwargs):
         super().__init__()
         self.coord_dim = coord_dim
         self.latent_dim = latent_dim
         self.num_latent_vectors = num_latent_vectors
         self.hidden_size = hidden_size
+        self.activation = activation.lower()
         
         # Learnable latent codes for each image
         self.latents = nn.Parameter(torch.randn(num_images, num_latent_vectors, latent_dim))
@@ -168,14 +275,27 @@ class VQINR(nn.Module):
             nn.Linear(latent_dim, hidden_size * 2) for _ in range(num_layers)
         ])
         
-        # SIREN decoder with FiLM modulation
-        self.decoder = ModulatedSiren(
-            in_dim=coord_dim, 
-            out_dim=value_dim, 
-            hidden_dim=hidden_size, 
-            num_layers=num_layers,
-            omega_0=30.0
-        )
+        # Decoder with FiLM modulation (SIREN or ReLU)
+        if self.activation == 'siren':
+            self.decoder = ModulatedSiren(
+                in_dim=coord_dim, 
+                out_dim=value_dim, 
+                hidden_dim=hidden_size, 
+                num_layers=num_layers,
+                omega_0=30.0
+            )
+        elif self.activation == 'relu':
+            num_freqs = kwargs.get('num_freqs', 0)  # Get NUM_FREQS from config
+            self.decoder = ModulatedReLU(
+                in_dim=coord_dim, 
+                out_dim=value_dim, 
+                hidden_dim=hidden_size, 
+                num_layers=num_layers,
+                num_freqs=num_freqs
+            )
+        else:
+            raise ValueError(f"Unknown activation: {activation}. Choose 'siren' or 'relu'.")
+        
         self.current_epoch = 0
 
     def forward(self, coords, latent_indices):

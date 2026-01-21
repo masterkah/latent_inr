@@ -4,9 +4,32 @@ import lightning as pl
 from src.utils import psnr
 
 
+def gradient_loss_masked(pred, gt, masks):
+    """
+    Compute gradient loss with channel masking
+    Args:
+        pred: predicted images (B, H, W, C)
+        gt: ground truth images (B, H, W, C)
+        masks: channel masks (B, C) in {0,1}
+    Returns:
+        gradient loss (scalar)
+    """
+    B, H, W, C = pred.shape
+    m = masks.view(B, 1, 1, C)
+
+    dx_pred = pred[:, 1:, :, :] - pred[:, :-1, :, :]
+    dx_gt   = gt[:, 1:, :, :]   - gt[:, :-1, :, :]
+
+    dy_pred = pred[:, :, 1:, :] - pred[:, :, :-1, :]
+    dy_gt   = gt[:, :, 1:, :]   - gt[:, :, :-1, :]
+
+    loss = ((dx_pred - dx_gt).abs() * m[:, :-1, :, :]).mean() + ((dy_pred - dy_gt).abs() * m[:, :, :-1, :]).mean()
+    return loss
+
+
 class MultiImageINRModule(pl.LightningModule):
     """Lightning module for training multi-image INR with VQ"""
-    def __init__(self, network, gt_images, track_indices, vis_intervals, lr):
+    def __init__(self, network, gt_images, track_indices, vis_intervals, lr, grad_loss_weight=0.0):
         """
         Args:
             network: VQINR model
@@ -14,10 +37,12 @@ class MultiImageINRModule(pl.LightningModule):
             track_indices: dict mapping dataset names to image indices for tracking
             vis_intervals: set of epochs at which to save visualizations
             lr: learning rate
+            grad_loss_weight: weight for gradient loss (default: 0.0)
         """
         super().__init__()
         self.network = network
         self.lr = lr
+        self.grad_loss_weight = grad_loss_weight
         self.gt_images = [t.detach().cpu() for t in gt_images]
         self.vis_intervals = set(vis_intervals)
         self.track_indices = track_indices
@@ -44,6 +69,31 @@ class MultiImageINRModule(pl.LightningModule):
         recon_loss = (loss_sq * masks_expanded).mean()
         
         loss = recon_loss + vq_loss
+        
+        # Add gradient loss if weight > 0
+        if self.grad_loss_weight > 0:
+            # Get image resolution from first image
+            B = coords.shape[0]
+            H = W = int(coords.shape[1] ** 0.5)  # Assume square images
+            
+            # Reshape outputs and values to image format
+            pred_imgs = outputs.view(B, H, W, -1)
+            gt_imgs = values.view(B, H, W, -1)
+            
+            grad_loss = gradient_loss_masked(pred_imgs, gt_imgs, masks)
+            
+            # Cosine warmup for gradient loss
+            warmup_epochs = 3000
+            if self.current_epoch < warmup_epochs:
+                import math
+                warmup_scale = 0.5 * (1 - math.cos(math.pi * self.current_epoch / warmup_epochs))
+            else:
+                warmup_scale = 1.0
+            
+            loss = loss + self.grad_loss_weight * warmup_scale * grad_loss
+            
+            self.log('train/grad_loss', grad_loss, prog_bar=False)
+            self.log('train/grad_loss_weight', warmup_scale * self.grad_loss_weight, prog_bar=False)
         
         self.log('train/loss', loss, prog_bar=True)
         return loss
