@@ -1,10 +1,11 @@
 *.pdf
 *.png
 *.jpg
-/__pycache__/
+**/__pycache__/
 /lightning_logs/
 *.csv
 .venv/
 .vscode/
 results/
 others/
+
