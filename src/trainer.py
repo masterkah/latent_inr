@@ -23,7 +23,7 @@ def gradient_loss_masked(pred, gt, masks):
     dy_pred = pred[:, :, 1:, :] - pred[:, :, :-1, :]
     dy_gt   = gt[:, :, 1:, :]   - gt[:, :, :-1, :]
 
-    loss = ((dx_pred - dx_gt).abs() * m[:, :-1, :, :]).mean() + ((dy_pred - dy_gt).abs() * m[:, :, :-1, :]).mean()
+    loss = ((dx_pred - dx_gt).abs() * m).mean() + ((dy_pred - dy_gt).abs() * m).mean()
     return loss
 
 
