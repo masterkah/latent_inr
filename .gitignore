@@ -6,3 +6,4 @@
 *.csv
 .venv/
 .vscode/
+results/
