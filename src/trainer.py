@@ -1,7 +1,7 @@
 """PyTorch Lightning training module for VQINR"""
 import torch
 import lightning as pl
-from src.model import psnr
+from src.utils import psnr
 
 
 class MultiImageINRModule(pl.LightningModule):
