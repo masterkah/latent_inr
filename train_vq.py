@@ -12,10 +12,10 @@ from torchvision.transforms.functional import pil_to_tensor
 from medmnist import BreastMNIST, RetinaMNIST, PneumoniaMNIST, PathMNIST
 
 from src.gpu_utils import auto_select_gpu
-from src.vq_model import VQINR
+from src.model import VQINR
 from src.dataset import FullImageDataset
 from src.trainer import MultiImageINRModule
-from src.visualization import save_all_visualizations
+from src.utils import save_all_visualizations
 
 
 def load_config(config_path):
