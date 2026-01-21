@@ -5,3 +5,6 @@ __pycache__/
 data/
 experiments/
 .DS_Store
+results/
+lightning_logs/
+.venv/
