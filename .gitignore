@@ -9,3 +9,4 @@ results/
 lightning_logs/
 .venv/
 others/
+train_script.sh
