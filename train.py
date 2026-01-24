@@ -1,16 +1,17 @@
 import torch
 import torch.nn as nn
-from torch.utils.data import DataLoader
 import matplotlib.pyplot as plt
 import argparse
 import os
-import json
 
 # local modules
 from src.dataset import PixelPointDataset, get_medmnist_data
 from src.model import AutoDecoderCNNWrapper, FourierFeatures
 from src.utils import (
-    setup_experiment_folder,
+    load_json_config,
+    configure_device,
+    build_dataloader,
+    make_run_folder,
     evaluate_dataset_psnr,
     save_reference_reconstructions,
     plot_tsne,
@@ -19,37 +20,29 @@ from src.utils import (
 )
 
 
-def _load_config(config_path):
-    with open(config_path, "r") as f:
-        config = json.load(f)
-    # Keep required keys explicit so config files are self-documenting and validated.
-    required_keys = [
-        "K_IMAGES",
-        "IMAGE_SIZE",
-        "BATCH_SIZE",
-        "DATASET_NAMES",
-        "INIT_SIGMA",
-        "NUM_EPOCHS",
-        "VIZ_INTERVAL",
-        "DECODER_LR",
-        "LATENT_LR",
-        "HIDDEN_DIM",
-        "NUM_LAYERS",
-        "MODEL_DROPOUT",
-        "FF_FREQS",
-        "FF_SCALE",
-        "SEED",
-        "LATENT_FEATURE_DIM",
-        "LATENT_SIZES",
-        "LATENT_SPATIAL_DIMS",
-        "NUM_WORKERS",
-        "PERSISTENT_WORKERS",
-        "PREFETCH_FACTOR",
-    ]
-    missing = [key for key in required_keys if key not in config]
-    if missing:
-        raise ValueError(f"Config missing required keys: {missing}")
-    return config
+REQUIRED_CONFIG_KEYS = [
+    "K_IMAGES",
+    "IMAGE_SIZE",
+    "BATCH_SIZE",
+    "DATASET_NAMES",
+    "INIT_SIGMA",
+    "NUM_EPOCHS",
+    "VIZ_INTERVAL",
+    "DECODER_LR",
+    "LATENT_LR",
+    "HIDDEN_DIM",
+    "NUM_LAYERS",
+    "MODEL_DROPOUT",
+    "FF_FREQS",
+    "FF_SCALE",
+    "SEED",
+    "LATENT_FEATURE_DIM",
+    "LATENT_SIZES",
+    "LATENT_SPATIAL_DIMS",
+    "NUM_WORKERS",
+    "PERSISTENT_WORKERS",
+    "PREFETCH_FACTOR",
+]
 
 
 def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
@@ -58,7 +51,7 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
     #   This disables the conv and uses one vector per image.
     # - Multires mode: set latent_spatial_dims to >1 values and choose latent_sizes divisible by (s^2).
     #   latent_size always means total latent parameters per image; latent_feature_dim controls decoder input width.
-    config = _load_config(config_path)
+    config = load_json_config(config_path, required_keys=REQUIRED_CONFIG_KEYS)
     # -------------------------------------- [Config] --------------------------------------
     # dataset
     K_IMAGES = int(config["K_IMAGES"])
@@ -70,7 +63,7 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
     INIT_SIGMA = float(config["INIT_SIGMA"])
 
     # training
-    DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    DEVICE, use_amp = configure_device(use_amp_tf32)
     NUM_EPOCHS = int(config["NUM_EPOCHS"])
     VIZ_INTERVAL = int(config["VIZ_INTERVAL"])  # in epochs
     DECODER_LR = float(config["DECODER_LR"])
@@ -81,7 +74,7 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
     NUM_LAYERS = int(config["NUM_LAYERS"])
     MODEL_DROPOUT = float(config["MODEL_DROPOUT"])
 
-    # fourrier features
+    # Fourier features
     FF_FREQS = int(config["FF_FREQS"])
     FF_SCALE = float(config["FF_SCALE"])
 
@@ -106,13 +99,6 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
     print(f"Running on {DEVICE}")
     set_global_seed(SEED)
     print(f"Using global seed: {SEED}")
-    if torch.cuda.is_available():
-        torch.backends.cuda.matmul.allow_tf32 = bool(use_amp_tf32)
-        torch.backends.cudnn.allow_tf32 = bool(use_amp_tf32)
-        if hasattr(torch, "set_float32_matmul_precision"):
-            torch.set_float32_matmul_precision("high" if use_amp_tf32 else "highest")
-    use_amp = bool(use_amp_tf32) and torch.cuda.is_available()
-
     output_folder = output_folder or "."
     os.makedirs(output_folder, exist_ok=True)
 
@@ -123,25 +109,13 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
         dataset_names=DATASET_NAMES,
         seed=SEED,
     )
-    print(
-        f"Training on tensor shape: {images_tensor.shape}"
-    )  # (K_IMAGES, NUM_CHANNELS, IMAGE_SIZE, IMAGE_SIZE)
+    print(f"Training on tensor shape: {images_tensor.shape}")
 
     # --- Create coordinate dataset ---
     dataset = PixelPointDataset(
         images_tensor, image_sources=image_sources, image_channels=image_channels
     )
-    # Only set worker-specific options when workers are enabled to avoid DataLoader warnings.
-    base_loader_kwargs = {
-        "batch_size": BATCH_SIZE,
-        "shuffle": True,
-        "num_workers": num_workers,
-        "pin_memory": torch.cuda.is_available(),
-    }
-    if num_workers > 0:
-        base_loader_kwargs["persistent_workers"] = persistent_workers
-        base_loader_kwargs["prefetch_factor"] = prefetch_factor
-
+    # DataLoader is built per run to keep shuffles identical across runs.
     # --- SWEEP LATENT SIZES ---
     average_psnr_histories = {}  # {latent_size: {s: (epochs, vals)}}
     # Reuse one positional encoder so all runs share the exact same random features.
@@ -155,12 +129,16 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
             set_global_seed(SEED)
 
             # Recreate the loader with a fixed seed so shuffles match across runs.
-            data_loader_generator = torch.Generator()
-            data_loader_generator.manual_seed(SEED)
-            train_loader = DataLoader(
+            train_loader = build_dataloader(
                 dataset,
-                generator=data_loader_generator,
-                **base_loader_kwargs,
+                batch_size=BATCH_SIZE,
+                shuffle=True,
+                num_workers=num_workers,
+                persistent_workers=persistent_workers,
+                prefetch_factor=prefetch_factor,
+                seed=SEED,
+                pin_memory=torch.cuda.is_available(),
+                drop_last=False,
             )
             spatial_area = latent_spatial_dim * latent_spatial_dim
             if latent_size % spatial_area != 0:
@@ -220,11 +198,10 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
                 "output_folder": output_folder,
             }
             # --> Setup run folder
-            run_folder = setup_experiment_folder(
+            run_folder = make_run_folder(
+                output_folder,
+                f"run_latent_{latent_size}_s{latent_spatial_dim}",
                 config,
-                base_name=os.path.join(
-                    output_folder, f"run_latent_{latent_size}_s{latent_spatial_dim}"
-                ),
             )
 
             # --> Logs stuff
@@ -295,17 +272,14 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
                     batch_coords = batch_coords.to(DEVICE, non_blocking=True)
                     batch_targets = batch_targets.to(DEVICE, non_blocking=True)
 
-                    # Forward Pass
                     optimizer.zero_grad(set_to_none=True)
                     with torch.amp.autocast(device_type=DEVICE.type, enabled=use_amp):
                         pred_vals, _ = model(batch_indices, batch_coords)
 
-                        # Loss Calculation (see Eq 9 in the paper)
                         rec_loss = loss_criterion(pred_vals, batch_targets)
 
                     last_rec_loss = rec_loss
 
-                    # Backprop
                     scaler.scale(rec_loss).backward()
                     scaler.step(optimizer)
                     scaler.update()
