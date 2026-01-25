@@ -1,0 +1,23 @@
+{
+  "K_IMAGES": 3000,
+  "IMAGE_SIZE": 64,
+  "BATCH_SIZE": 32768,
+  "DATASET_NAMES": ["pneumoniamnist", "pathmnist", "bloodmnist"],
+  "NUM_EPOCHS": 1000,
+  "VIZ_INTERVAL": 10,
+  "SEED": 42,
+  "NUM_WORKERS": 8,
+  "PERSISTENT_WORKERS": true,
+  "PREFETCH_FACTOR": 2,
+  "COORD_DIM": 2,
+  "LATENT_DIM": 128,
+  "NUM_CODES": 512,
+  "NUM_LATENT_VECTORS": 4,
+  "HIDDEN_SIZE": 512,
+  "NUM_LAYERS": 6,
+  "COMMITMENT_COST": 0.2,
+  "LR": 0.0005,
+  "ACTIVATION": "siren",
+  "NUM_FREQS": 15,
+  "GRAD_LOSS_WEIGHT": 0.05
+}
