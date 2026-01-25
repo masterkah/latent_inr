@@ -1,7 +1,7 @@
 {
   "K_IMAGES": 3000,
   "IMAGE_SIZE": 64,
-  "BATCH_SIZE": 32768,
+  "BATCH_SIZE": 8,
   "DATASET_NAMES": ["pneumoniamnist", "pathmnist", "bloodmnist"],
   "NUM_EPOCHS": 1000,
   "VIZ_INTERVAL": 10,
