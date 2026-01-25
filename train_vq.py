@@ -103,7 +103,11 @@ def main():
     LR = float(config["LR"])
     GRAD_LOSS_WEIGHT = float(config.get("GRAD_LOSS_WEIGHT", 0.0))
 
+    activation = config.get("ACTIVATION", "siren").lower()
     device, use_amp = configure_device(args.use_amp_tf32)
+    if activation == "siren" and use_amp:
+        print("SIREN + AMP can produce NaNs; disabling AMP for this run.")
+        use_amp = False
     print(f"Running on {device}")
     set_global_seed(SEED)
 

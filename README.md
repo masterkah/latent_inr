@@ -59,6 +59,8 @@ Flags:
 - `-use-amp-tf32` (default: `1`): enables AMP/TF32 when CUDA is available.
 - `-output-folder` (default: `.`): base folder for all outputs.
 
+Note: VQ runs with `ACTIVATION="siren"` auto-disable AMP to avoid NaNs.
+
 ### Outputs
 
 Latent size/resolution outputs:
