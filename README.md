@@ -50,7 +50,7 @@ python train.py -config config/latent_size_only_300.json -output-folder "experim
 ```
 
 ```bash
-python train_vq.py -config config/vqinr_300.json -output-folder "experiments"
+python train_vq.py -config config/vqinr_relu_300.json -output-folder "experiments"
 ```
 
 Flags:
