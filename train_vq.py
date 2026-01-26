@@ -38,6 +38,7 @@ REQUIRED_CONFIG_KEYS = [
     "HIDDEN_SIZE",
     "NUM_LAYERS",
     "COMMITMENT_COST",
+    "WARMUP_EPOCHS",
     "LR",
 ]
 
@@ -53,6 +54,7 @@ def _create_model(config, num_images, value_dim):
         num_latent_vectors=config["NUM_LATENT_VECTORS"],
         num_images=num_images,
         commitment_cost=config["COMMITMENT_COST"],
+        warmup_epochs=config["WARMUP_EPOCHS"],
         activation=config.get("ACTIVATION", "siren"),
         num_freqs=config.get("NUM_FREQS", 10),
     )

@@ -16,6 +16,7 @@
   "HIDDEN_SIZE": 512,
   "NUM_LAYERS": 6,
   "COMMITMENT_COST": 0.2,
+  "WARMUP_EPOCHS": 300,
   "LR": 0.0005,
   "ACTIVATION": "relu",
   "NUM_FREQS": 15,

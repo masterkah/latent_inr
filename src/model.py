@@ -287,6 +287,7 @@ class VQINR(nn.Module):
         num_latent_vectors,
         num_images,
         commitment_cost,
+        warmup_epochs=5000,
         activation="siren",
         **kwargs,
     ):
@@ -296,6 +297,7 @@ class VQINR(nn.Module):
         self.num_latent_vectors = num_latent_vectors
         self.hidden_size = hidden_size
         self.activation = activation.lower()
+        self.warmup_epochs = int(warmup_epochs)
 
         # Learnable latent codes for each image
         self.latents = nn.Parameter(
@@ -377,10 +379,9 @@ class VQINR(nn.Module):
         # Cosine warmup for quantized codes
         effective_z = z_q_sum
         if self.training:
-            warmup_epochs = 5000
-            if self.current_epoch < warmup_epochs:
+            if self.warmup_epochs > 0 and self.current_epoch < self.warmup_epochs:
                 scale = 0.5 * (
-                    1 - math.cos(math.pi * self.current_epoch / warmup_epochs)
+                    1 - math.cos(math.pi * self.current_epoch / self.warmup_epochs)
                 )
             else:
                 scale = 1.0

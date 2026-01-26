@@ -38,6 +38,7 @@ Codebook/VQ (train_vq.py) key knobs:
 - `K_IMAGES` and `DATASET_NAMES`: total images and dataset sources.
 - `LATENT_DIM`, `NUM_CODES`, `NUM_LATENT_VECTORS`: VQ codebook and residual quantization settings.
 - `HIDDEN_SIZE`, `NUM_LAYERS`, `ACTIVATION`, `NUM_FREQS`: decoder architecture and positional encoding.
+- `WARMUP_EPOCHS`: cosine warmup length for quantized latents.
 - `NUM_EPOCHS`, `VIZ_INTERVAL` (epochs), `BATCH_SIZE`, `NUM_WORKERS`, and `LR`.
 
 ### Running
