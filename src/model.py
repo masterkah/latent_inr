@@ -123,7 +123,7 @@ class PositionalEncoding(nn.Module):
         # x: [B, in_dim]
         encoded = [x]
         for freq in self.freq_bands:
-            # Clamp to prevent overflow in high-frequency encodings
+            # Clamp to avoid fp16 overflow for large frequency bands.
             arg = torch.clamp(2 * np.pi * freq * x, -1e4, 1e4)
             encoded.append(torch.sin(arg))
             encoded.append(torch.cos(arg))
@@ -222,9 +222,7 @@ class EMAVectorQuantizer(nn.Module):
         embedding = torch.randn(num_codes, code_dim)
         embedding = embedding / embedding.norm(dim=1, keepdim=True)
         self.register_buffer("embedding", embedding)
-        
-        self.register_buffer("ema_cluster_size", torch.ones(num_codes))
-        
+        self.register_buffer("ema_cluster_size", torch.zeros(num_codes))
         self.register_buffer("ema_embedding", self.embedding.clone())
 
     def forward(self, z):
@@ -254,21 +252,17 @@ class EMAVectorQuantizer(nn.Module):
         # Update codebook using EMA
         if self.training and torch.is_grad_enabled():
             encodings = F.one_hot(indices, self.num_codes).float()
-            
             self.ema_cluster_size.mul_(self.decay).add_(
                 encodings.sum(0) * (1 - self.decay)
             )
-            
             dw = encodings.t() @ z_flat.detach()
             self.ema_embedding.mul_(self.decay).add_(dw * (1 - self.decay))
-            
             n = self.ema_cluster_size.sum()
             cluster_size = (
                 (self.ema_cluster_size + self.epsilon)
                 / (n + self.num_codes * self.epsilon)
                 * n
             )
-            
             self.embedding.copy_(self.ema_embedding / cluster_size.unsqueeze(1))
 
         # Straight-through estimator
@@ -295,6 +289,7 @@ class VQINR(nn.Module):
         num_latent_vectors,
         num_images,
         commitment_cost,
+        warmup_epochs=5000,
         activation="siren",
         **kwargs,
     ):
@@ -304,8 +299,9 @@ class VQINR(nn.Module):
         self.num_latent_vectors = num_latent_vectors
         self.hidden_size = hidden_size
         self.activation = activation.lower()
+        self.warmup_epochs = int(warmup_epochs)
 
-        # Learnable latent codes for each image (scaled down for stability)
+        # Learnable latent codes for each image (small init stabilizes FiLM).
         self.latents = nn.Parameter(
             torch.randn(num_images, num_latent_vectors, latent_dim) * 0.01
         )
@@ -326,7 +322,6 @@ class VQINR(nn.Module):
         self.modulation_layers = nn.ModuleList(
             [nn.Linear(latent_dim, hidden_size * 2) for _ in range(num_layers)]
         )
-        # Initialize modulation layers with small weights for stability
         for layer in self.modulation_layers:
             nn.init.normal_(layer.weight, mean=0.0, std=0.001)
             nn.init.zeros_(layer.bias)
@@ -372,14 +367,8 @@ class VQINR(nn.Module):
 
         # Get latent codes for batch
         img_latents = self.latents[latent_indices]
-        # Use mean instead of sum to avoid amplifying scale
+        # Average keeps latent scale consistent across num_latent_vectors.
         z = img_latents.mean(dim=1)
-        
-        # Check for NaN in latent codes
-        if torch.isnan(z).any():
-            print(f"⚠️  WARNING: NaN in latent codes at epoch {self.current_epoch}")
-            # Reset to small random values if NaN detected
-            z = torch.randn_like(z) * 0.01
 
         # Residual VQ: quantize in stages
         residual = z
@@ -396,10 +385,9 @@ class VQINR(nn.Module):
         # Cosine warmup for quantized codes
         effective_z = z_q_sum
         if self.training:
-            warmup_epochs = 5000
-            if self.current_epoch < warmup_epochs:
+            if self.warmup_epochs > 0 and self.current_epoch < self.warmup_epochs:
                 scale = 0.5 * (
-                    1 - math.cos(math.pi * self.current_epoch / warmup_epochs)
+                    1 - math.cos(math.pi * self.current_epoch / self.warmup_epochs)
                 )
             else:
                 scale = 1.0
@@ -411,7 +399,7 @@ class VQINR(nn.Module):
 
         for layer in self.modulation_layers:
             mod_out = layer(effective_z)  # [B, 2 * Hidden]
-            # Clamp modulation output to prevent extreme values
+            # Clamp FiLM parameters to avoid extreme modulation.
             mod_out = torch.clamp(mod_out, -10.0, 10.0)
             g, b = mod_out.chunk(2, dim=-1)  # [B, Hidden] each
 
@@ -427,12 +415,6 @@ class VQINR(nn.Module):
 
         # Decode with FiLM modulation
         values_flat = self.decoder(coords_flat, gammas=gammas, betas=betas)
-        
-        # Clamp output to valid range and check for NaN
-        values_flat = torch.clamp(values_flat, -2.0, 2.0)
-        if torch.isnan(values_flat).any() or torch.isinf(values_flat).any():
-            # Return zeros if NaN/Inf detected to allow training to continue
-            values_flat = torch.zeros_like(values_flat)
 
         return values_flat.view(batch_size, num_points, -1), None, total_vq_loss
 
