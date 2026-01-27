@@ -29,7 +29,8 @@ Latent size/resolution (train.py) key knobs:
 - `LATENT_SIZES`: list of total latent parameters per image to compare.
 - `LATENT_SPATIAL_DIMS`: list of spatial grid sizes `s` to compare per `LATENT_SIZE`.
 - `LATENT_FEATURE_DIM`: decoder input width after the conv (fixed for fair `s` comparisons).
-  For `s>1`, a shared 3x3 conv is applied to each image's latent grid before sampling per-pixel latents;
+- `CONV_KERNEL_SIZE`: odd kernel size for the shared conv used when `s>1` (padding keeps spatial dims unchanged).
+  For `s>1`, a shared conv is applied to each image's latent grid before sampling per-pixel latents;
   for `s=1`, the conv is disabled and the model reduces to a single latent vector per image.
 - `NUM_EPOCHS`, `BATCH_SIZE`, `VIZ_INTERVAL` (epochs), `NUM_WORKERS`, and dataset settings.
 
@@ -78,6 +79,7 @@ Summary plots in the output folder:
 - `latent_all_runs_psnr_epochs.png` (when `LATENT_SPATIAL_DIMS` is not `[1]`)
 - `latent_size_<size>_spatial_sweep.png` (when `LATENT_SPATIAL_DIMS` is not `[1]`)
 - `latent_spatial_comparison.png` (when `LATENT_SPATIAL_DIMS` is not `[1]`)
+- `models/` folder with final model checkpoints per run, named `run_latent_<size>_s<s>.pth`
 
 Codebook/VQ outputs:
 

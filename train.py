@@ -12,6 +12,7 @@ from src.utils import (
     configure_device,
     build_dataloader,
     make_run_folder,
+    save_checkpoint,
     evaluate_dataset_psnr,
     save_reference_reconstructions,
     plot_tsne,
@@ -37,6 +38,7 @@ REQUIRED_CONFIG_KEYS = [
     "FF_SCALE",
     "SEED",
     "LATENT_FEATURE_DIM",
+    "CONV_KERNEL_SIZE",
     "LATENT_SIZES",
     "LATENT_SPATIAL_DIMS",
     "NUM_WORKERS",
@@ -87,7 +89,10 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
     # spatial resolutions fairly; if set to None, it follows latent_channels and
     # the decoder input width changes with latent_spatial_dim. For s=1, we always
     # use latent_feature_dim = latent_channels to recover the classic behavior.
+    # conv_kernel_size controls the shared conv for s>1; padding preserves spatial dims.
     LATENT_FEATURE_DIM = config["LATENT_FEATURE_DIM"]
+    conv_kernel_size_value = config["CONV_KERNEL_SIZE"]
+    CONV_KERNEL_SIZE = None if conv_kernel_size_value is None else int(conv_kernel_size_value)
     latent_sizes = config["LATENT_SIZES"]
     latent_spatial_dims = config["LATENT_SPATIAL_DIMS"]
     num_workers = int(config["NUM_WORKERS"])
@@ -179,6 +184,7 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
                 "config_path": config_path,
                 "latent_size": latent_size,
                 "latent_feature_dim": latent_feature_dim,
+                "conv_kernel_size": CONV_KERNEL_SIZE,
                 "hidden_dim": HIDDEN_DIM,
                 "latent_channels": latent_channels,
                 "latent_spatial_dim": latent_spatial_dim,
@@ -217,6 +223,7 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
                 latent_feature_dim=latent_feature_dim,
                 latent_channels=latent_channels,
                 latent_spatial_dim=latent_spatial_dim,
+                conv_kernel_size=CONV_KERNEL_SIZE,
                 sigma=INIT_SIGMA,
                 num_layers=NUM_LAYERS,
                 out_channels=out_channels,
@@ -313,17 +320,29 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
                         expected_num_clusters=len(DATASET_NAMES),
                     )
 
-                if last_rec_loss is not None and (
-                    debug or ((not debug) and epoch_idx % VIZ_INTERVAL == 0)
-                ):
-                    psnr_display = (
-                        f"{last_avg_psnr:.2f} dB"
-                        if last_avg_psnr is not None
-                        else "n/a"
-                    )
-                    print(
-                        f"Epoch {epoch_idx} | Rec loss: {last_rec_loss.item():.6f} | Avg PSNR: {psnr_display}"
-                    )
+            if last_rec_loss is not None and (
+                debug or ((not debug) and epoch_idx % VIZ_INTERVAL == 0)
+            ):
+                psnr_display = (
+                    f"{last_avg_psnr:.2f} dB"
+                    if last_avg_psnr is not None
+                    else "n/a"
+                )
+                print(
+                    f"Epoch {epoch_idx} | Rec loss: {last_rec_loss.item():.6f} | Avg PSNR: {psnr_display}"
+                )
+
+            # Save final model state for inference reuse (once per run).
+            run_tag = f"run_latent_{latent_size}_s{latent_spatial_dim}"
+            save_checkpoint(
+                model,
+                optimizer,
+                step=epoch_idx,
+                config=config,
+                run_folder=output_folder,
+                filename=f"{run_tag}.pth",
+                subdir="models",
+            )
 
             average_psnr_histories.setdefault(latent_size, {})[latent_spatial_dim] = (
                 per_image_logs["epochs"],

@@ -588,12 +588,14 @@ def plot_tsne(
 
 # --------------------- Checkpoint Functions ---------------------
 
-def save_checkpoint(model, optimizer, step, config, run_folder, filename=None):
-    """Saves model and optimizer state."""
+def save_checkpoint(
+    model, optimizer, step, config, run_folder, filename=None, subdir="checkpoints"
+):
+    """Saves model (including buffers) and optimizer state for inference reuse."""
     if filename is None:
         filename = f"checkpoint_step_{step}.pth"
         
-    ckpt_folder = os.path.join(run_folder, "checkpoints")
+    ckpt_folder = os.path.join(run_folder, subdir)
     if not os.path.exists(ckpt_folder):
         os.makedirs(ckpt_folder)
         
@@ -607,10 +609,12 @@ def save_checkpoint(model, optimizer, step, config, run_folder, filename=None):
     }, save_path)
     print(f"Checkpoint saved: {save_path}")
 
-def load_checkpoint(model, checkpoint_path, device, optimizer=None):
+def load_checkpoint(model, checkpoint_path, device, optimizer=None, strict=True):
     """
     Loads weights into model. 
     If optimizer is provided, loads optimizer state (for resuming training).
+    For this project, checkpoints are intended for inference reuse, not for
+    resuming training.
     Returns (start_step, config).
     """
     if not os.path.exists(checkpoint_path):
@@ -619,7 +623,7 @@ def load_checkpoint(model, checkpoint_path, device, optimizer=None):
     print(f"Loading checkpoint from {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location=device)
     
-    model.load_state_dict(checkpoint['model_state_dict'])
+    model.load_state_dict(checkpoint['model_state_dict'], strict=strict)
     
     if optimizer is not None and 'optimizer_state_dict' in checkpoint:
         optimizer.load_state_dict(checkpoint['optimizer_state_dict'])

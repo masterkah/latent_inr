@@ -15,6 +15,7 @@
   "FF_SCALE": 1.25,
   "SEED": 42,
   "LATENT_FEATURE_DIM": null,
+  "CONV_KERNEL_SIZE": null,
   "LATENT_SIZES": [16, 32, 64, 128, 256, 512],
   "LATENT_SPATIAL_DIMS": [1],
   "NUM_WORKERS": 8,

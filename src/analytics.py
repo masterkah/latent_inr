@@ -1,11 +1,24 @@
+import os
+import numpy as np
 import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
-import os
-from torchvision.utils import make_grid
 
-from utils import reconstruct_single_image
-import numpy as np
+from src.utils import reconstruct_single_image
+
+
+def _restore_model_mode(model, was_training):
+    if was_training:
+        model.train()
+    else:
+        model.eval()
+
+
+def _prep_imshow_image(img):
+    """Convert HWC array to a format suitable for imshow."""
+    if img.ndim == 3 and img.shape[2] == 1:
+        return img[..., 0]
+    return img
 
 def enable_dropout(model):
     """
@@ -20,6 +33,8 @@ def get_mc_dropout_stats(model, img_idx, dataset, device, T=20, batch_size=4096)
     """
     Performs T forward passes with Dropout enabled to estimate uncertainty.
     """
+    # Expects a PixelPointDataset (uses shared_coords/flat_pixels); not compatible with VQINR.
+    was_training = model.training
     # 1. Set model to eval mode (freezes BatchNorm stats)
     model.eval()
     # 2. Force Dropout layers to train mode (activates randomness)
@@ -55,7 +70,7 @@ def get_mc_dropout_stats(model, img_idx, dataset, device, T=20, batch_size=4096)
     mean_pred = stack.mean(dim=0)
     variance = stack.var(dim=0)
     std_dev = stack.std(dim=0)
-    
+    _restore_model_mode(model, was_training)
     return mean_pred, variance, std_dev
 
 def plot_uncertainty_maps(mean, var, std, dataset, img_idx, run_folder, suffix=""):
@@ -65,24 +80,26 @@ def plot_uncertainty_maps(mean, var, std, dataset, img_idx, run_folder, suffix="
     H, W, C = dataset.H, dataset.W, dataset.C
     
     # Reshape and move to CPU
-    mean_img = mean.reshape(H, W, C).permute(2, 0, 1).cpu().numpy().squeeze()
-    var_img = var.reshape(H, W, C).permute(2, 0, 1).cpu().numpy().mean(axis=0)
-    std_img = std.reshape(H, W, C).permute(2, 0, 1).cpu().numpy().mean(axis=0)
-    
-    gt_img = dataset.flat_pixels[img_idx].reshape(H, W, C).permute(2, 0, 1).cpu().numpy().squeeze()
+    mean_img = mean.reshape(H, W, C).cpu().numpy()
+    var_img = var.reshape(H, W, C).cpu().numpy().mean(axis=2)
+    std_img = std.reshape(H, W, C).cpu().numpy().mean(axis=2)
+
+    gt_img = dataset.flat_pixels[img_idx].reshape(H, W, C).cpu().numpy()
+    mean_disp = _prep_imshow_image(mean_img)
+    gt_disp = _prep_imshow_image(gt_img)
 
     fig, axes = plt.subplots(1, 4, figsize=(20, 5))
     
     # 1. Ground Truth
     ax = axes[0]
-    im0 = ax.imshow(gt_img, cmap='gray', vmin=0, vmax=1)
+    im0 = ax.imshow(gt_disp, cmap='gray', vmin=0, vmax=1)
     ax.set_title(f"Ground Truth (Idx {img_idx})")
     ax.axis('off')
     plt.colorbar(im0, ax=ax, fraction=0.046, pad=0.04)
 
     # 2. Mean Prediction
     ax = axes[1]
-    im1 = ax.imshow(mean_img, cmap='gray', vmin=0, vmax=1)
+    im1 = ax.imshow(mean_disp, cmap='gray', vmin=0, vmax=1)
     ax.set_title("MC Mean Reconstruction")
     ax.axis('off')
     plt.colorbar(im1, ax=ax, fraction=0.046, pad=0.04)
@@ -130,11 +147,13 @@ def perturb_latent_and_reconstruct(model, img_idx, dataset, coords, epsilon, dev
     
     # 3. Reconstruct
     # This uses the helper from utils to handle batching/memory
+    was_training = model.training
     try:
         recon_flat = reconstruct_single_image(model, img_idx, dataset, device)
     finally:
         # 4. Restore (CRITICAL: Always use try/finally to ensure restore happens)
         model.latents.data[img_idx, :, gy, gx] = original_slice
+        _restore_model_mode(model, was_training)
         
     return recon_flat
 
@@ -147,15 +166,18 @@ def visualize_grid_perturbation(model, dataset, img_idx, points_to_perturb, epsi
                            Example: [(0,0), (4,4), (7,7)] for top-left, center, bottom-right (8x8 grid).
     """
     print(f"Running Spatial Perturbation Analysis on Image {img_idx} with epsilon={epsilon}...")
-    
+
     H, W, C = dataset.H, dataset.W, dataset.C
-    
+    was_training = model.training
+
     # 1. Get Baseline (No perturbation)
     baseline_flat = reconstruct_single_image(model, img_idx, dataset, device)
-    baseline_img = baseline_flat.reshape(H, W, C).permute(2, 0, 1).cpu().numpy().squeeze()
+    baseline_img = baseline_flat.reshape(H, W, C).cpu().numpy()
     
     # 2. Get Ground Truth
-    gt_img = dataset.flat_pixels[img_idx].reshape(H, W, C).permute(2, 0, 1).cpu().numpy().squeeze()
+    gt_img = dataset.flat_pixels[img_idx].reshape(H, W, C).cpu().numpy()
+    baseline_disp = _prep_imshow_image(baseline_img)
+    gt_disp = _prep_imshow_image(gt_img)
     
     num_points = len(points_to_perturb)
     # Rows: 1 (GT/Base) + 1 (Perturbed Recon) + 1 (Difference Map)
@@ -166,13 +188,13 @@ def visualize_grid_perturbation(model, dataset, img_idx, points_to_perturb, epsi
     # --- Row 1: Baselines ---
     # Plot GT
     ax_gt = plt.subplot(3, num_points + 1, 1)
-    ax_gt.imshow(gt_img, cmap='gray', vmin=0, vmax=1)
+    ax_gt.imshow(gt_disp, cmap='gray', vmin=0, vmax=1)
     ax_gt.set_title(f"Ground Truth (Idx {img_idx})")
     ax_gt.axis('off')
     
     # Plot Baseline Recon
     ax_base = plt.subplot(3, num_points + 1, num_points + 2) # Start of row 2
-    ax_base.imshow(baseline_img, cmap='gray', vmin=0, vmax=1)
+    ax_base.imshow(baseline_disp, cmap='gray', vmin=0, vmax=1)
     ax_base.set_title("Baseline Reconstruction")
     ax_base.axis('off')
 
@@ -180,37 +202,35 @@ def visualize_grid_perturbation(model, dataset, img_idx, points_to_perturb, epsi
     for i, (py, px) in enumerate(points_to_perturb):
         # Perform perturbation
         pert_flat = perturb_latent_and_reconstruct(model, img_idx, dataset, (py, px), epsilon, device)
-        pert_img = pert_flat.reshape(H, W, C).permute(2, 0, 1).cpu().numpy().squeeze()
+        pert_img = pert_flat.reshape(H, W, C).cpu().numpy()
+        pert_disp = _prep_imshow_image(pert_img)
         
         # Calculate Difference
         diff_img = np.abs(pert_img - baseline_img)
+        diff_disp = diff_img.mean(axis=2) if C > 1 else diff_img[..., 0]
         
         # Col index for this point (shifted by 1 because col 0 is references)
         col_idx = i + 2 
         
         # Plot Perturbed Image
         ax_p = plt.subplot(3, num_points + 1, col_idx)
-        ax_p.imshow(pert_img, cmap='gray', vmin=0, vmax=1)
+        ax_p.imshow(pert_disp, cmap='gray', vmin=0, vmax=1)
         ax_p.set_title(f"Perturbed Grid ({py}, {px})\nepsilon={epsilon}")
         ax_p.axis('off')
         
         # Plot Difference Map
         # We use 'seismic' or 'bwr' centered at 0, or just 'inferno' for absolute diff
         ax_d = plt.subplot(3, num_points + 1, col_idx + (num_points + 1))
-        im_d = ax_d.imshow(diff_img, cmap='inferno') # Bright colors = high change
+        im_d = ax_d.imshow(diff_disp, cmap='inferno') # Bright colors = high change
         ax_d.set_title(f"Difference Map ({py}, {px})")
         ax_d.axis('off')
         plt.colorbar(im_d, ax=ax_d, fraction=0.046)
 
-        # Zoom/Crop (Optional: Plot a zoomed version of the difference in Row 3)
-        # For now, let's just leave Row 3 empty or use it for specific channel metrics if needed.
-        # Let's actually put the diff map in Row 2 and Perturbed in Row 1 (next to GT)?
-        # Let's stick to the current layout but maybe center it better.
-        
     plt.tight_layout()
     save_path = os.path.join(run_folder, f"perturb_analysis_img_{img_idx}_eps{epsilon}.png")
     plt.savefig(save_path)
     plt.close()
+    _restore_model_mode(model, was_training)
     print(f"Spatial perturbation plot saved to {save_path}")
 
 
@@ -231,9 +251,9 @@ def compute_patch_wise_variance(model, dataset, img_idx, device, T=20):
     
     # Reshape to Image (H, W) - averaging channels if RGB
     H, W, C = dataset.H, dataset.W, dataset.C
-    var_img = var_flat.reshape(H, W, C).permute(2, 0, 1).cpu().numpy().mean(axis=0)
+    var_img = var_flat.reshape(H, W, C).cpu().numpy().mean(axis=2)
     
-    # 2. Get Grid Dimensions
+    # 2. Get Grid Dimensions (assumes H/W divisible by S).
     # model.latents is (K, C, S, S)
     S = model.latents.shape[-1]
     
