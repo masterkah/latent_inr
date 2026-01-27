@@ -518,9 +518,10 @@ class FourierFeatures(nn.Module):
         super().__init__()
         self.freq_num = freq_num  # Number of frequencies
         self.freq_scale = freq_scale  # Standard deviation of the frequencies
-        # Note: B_gauss is not registered as a buffer, so it won't be in state_dict.
-        self.B_gauss = (
-            torch.normal(0.0, 1.0, size=(coord_size, self.freq_num)) * self.freq_scale
+        # Register as buffer so checkpoints capture the exact Fourier features.
+        self.register_buffer(
+            "B_gauss",
+            torch.normal(0.0, 1.0, size=(coord_size, self.freq_num)) * self.freq_scale,
         )
 
         # We store the output size of the module so that the INR knows what input size to expect
@@ -546,6 +547,7 @@ class AutoDecoderCNNWrapper(nn.Module):
         latent_spatial_dim=8,
         latent_channels=32,
         latent_feature_dim=32,
+        conv_kernel_size=3,
         hidden_dim=256,
         num_layers=8,
         out_channels=1,
@@ -586,11 +588,24 @@ class AutoDecoderCNNWrapper(nn.Module):
                 "latent_feature_dim must match latent_channels when latent_spatial_dim=1 "
                 "because the conv is disabled."
             )
-        self.conv = (
-            nn.Conv2d(latent_channels, latent_feature_dim, kernel_size=3, padding=1)
-            if latent_spatial_dim != 1
-            else nn.Identity()
-        )
+        if latent_spatial_dim != 1:
+            if conv_kernel_size is None:
+                raise ValueError(
+                    "conv_kernel_size must be set when latent_spatial_dim != 1."
+                )
+            if conv_kernel_size < 1 or conv_kernel_size % 2 == 0:
+                raise ValueError(
+                    "conv_kernel_size must be a positive odd integer to preserve spatial dims."
+                )
+            conv_padding = conv_kernel_size // 2
+            self.conv = nn.Conv2d(
+                latent_channels,
+                latent_feature_dim,
+                kernel_size=conv_kernel_size,
+                padding=conv_padding,
+            )
+        else:
+            self.conv = nn.Identity()
 
     def forward(self, image_indices, coords):
 
@@ -601,7 +616,7 @@ class AutoDecoderCNNWrapper(nn.Module):
 
         # -> ADD SPATIAL STRUCTURE
         # Apply the shared convolution, mixes information locally
-        # Shape: (Batch, latent_feature_dim, s, s) bc 3x3 conv with 1 padding (so w,h doesn't change, only channels)
+        # Shape: (Batch, latent_feature_dim, s, s) because padding preserves spatial dims.
         modulated_grids = self.conv(current_grids)
 
         if self.latent_spatial_dim == 1:
