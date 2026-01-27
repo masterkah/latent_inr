@@ -5,6 +5,47 @@ from medmnist import INFO
 from torch.utils.data import Dataset
 from torchvision.transforms.functional import pil_to_tensor
 
+
+# Returns flattened (x, y) coords in [-1, 1] to match grid_sample order.
+def make_coord_grid(height, width):
+    y = torch.linspace(-1, 1, height)
+    x = torch.linspace(-1, 1, width)
+    yy, xx = torch.meshgrid(y, x, indexing="ij")
+    return torch.stack([xx, yy], dim=-1).reshape(-1, 2)
+
+
+class FullImageDataset(Dataset):
+    def __init__(self, images: list, image_channels=None):
+        super().__init__()
+        if image_channels is not None and len(image_channels) != len(images):
+            raise ValueError("image_channels length must match number of images.")
+        self.images = []
+        self.masks = []
+        for idx, img in enumerate(images):
+            h, w, c = img.shape
+            orig_c = image_channels[idx] if image_channels is not None else c
+            if orig_c not in (1, 3):
+                raise ValueError(f"Unsupported original channel count: {orig_c}")
+            if c not in (1, 3):
+                raise ValueError(f"Unsupported image channel count: {c}")
+            # Mask selects valid channels when grayscale was promoted to RGB.
+            if orig_c == 1 and c == 3:
+                mask = torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)
+            else:
+                mask = torch.ones(c, dtype=torch.float32)
+
+            coords = make_coord_grid(h, w)
+            values = img.reshape(-1, c)
+            self.images.append((coords, values))
+            self.masks.append(mask)
+
+    def __len__(self):
+        return len(self.images)
+
+    def __getitem__(self, idx: int):
+        return self.images[idx][0], self.images[idx][1], idx, self.masks[idx]
+
+
 # ------------------------------------------
 # Coordinate Dataset
 # ------------------------------------------
@@ -32,44 +73,21 @@ class PixelPointDataset(Dataset):
             )
         self.image_channels = image_channels
 
-        # --- A. Create Coordinate Grid (Shared across all images) ---
-        # range [-1, 1]
-        y_coords = torch.linspace(-1, 1, self.H)
-        x_coords = torch.linspace(-1, 1, self.W)
+        # Shared coordinate grid in [-1, 1], flattened to (H*W, 2).
+        self.shared_coords = make_coord_grid(self.H, self.W)
 
-        # indexing='ij' ensures that:
-        # grid_y varies along the height (rows)
-        # grid_x varies along the width (cols)
-        # thus matching the memory layout of the image tensor
-        grid_y, grid_x = torch.meshgrid(y_coords, x_coords, indexing="ij")
-
-        # Stack to (H, W, 2) then flatten to (H*W, 2); reused for every image.
-        self.shared_coords = torch.stack([grid_x, grid_y], dim=-1).reshape(-1, 2)
-
-        # --- B. Flatten Images ---
-        # Current: (K, C, H, W)
-        # Permute to: (K, H, W, C) -> channel-last for pixel extraction
-        # Reshape to: (K, H*W, C) -> Flatten spatial dims
+        # Flatten to (K, H*W, C) for direct indexing.
         self.flat_pixels = images_tensor.permute(0, 2, 3, 1).reshape(self.K, -1, self.C)
 
         self.num_pixels_per_img = self.H * self.W
 
     def __len__(self):
-        # Total data points = Images * Pixels per image
         return self.K * self.num_pixels_per_img
 
     def __getitem__(self, idx):
-        # Determine which image 'idx' belongs to
         img_idx = idx // self.num_pixels_per_img
-
-        # Determine which pixel inside that image
         pixel_idx = idx % self.num_pixels_per_img
-
-        # Now retrieve data
-        # Use shared_coords for the spatial location (x,y)
         coord = self.shared_coords[pixel_idx]
-
-        # Use img_idx and pixel_idx to get the specific pixel color
         pixel_val = self.flat_pixels[img_idx, pixel_idx]
 
         return img_idx, coord, pixel_val
@@ -77,6 +95,21 @@ class PixelPointDataset(Dataset):
 
 def _normalize_name(name: str) -> str:
     return name.lower().replace("_", "").replace("-", "")
+
+
+def build_track_indices(
+    image_sources, dataset_names, max_per_dataset=3, drop_empty=True
+):
+    dataset_keys = [_normalize_name(name) for name in dataset_names]
+    counts = {key: 0 for key in dataset_keys}
+    track_indices = {key: [] for key in dataset_keys}
+    for idx, src in enumerate(image_sources):
+        if src in counts and counts[src] < max_per_dataset:
+            track_indices[src].append(idx)
+            counts[src] += 1
+    if drop_empty:
+        track_indices = {key: vals for key, vals in track_indices.items() if vals}
+    return track_indices
 
 
 def _resolve_medmnist_class(dataset_name: str):

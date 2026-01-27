@@ -5,3 +5,8 @@ __pycache__/
 data/
 experiments/
 .DS_Store
+results/
+lightning_logs/
+.venv/
+others/
+train_script.sh

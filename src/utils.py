@@ -1,7 +1,3 @@
-# ------------------------------------------
-#  Useful functions (visualizations etc.)
-# ------------------------------------------
-
 import os
 import json
 import random
@@ -9,17 +5,13 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
+from torch.utils.data import DataLoader
 from torchvision.utils import make_grid, save_image
 from sklearn.manifold import TSNE
 from sklearn.cluster import KMeans
 from matplotlib.offsetbox import OffsetImage, AnnotationBbox
 
-# ------------------------ Misc. ------------------------
-
-
-# from a pytorch forum
-def count_parameters(model):
-    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+# -------------------- Shared helpers --------------------
 
 
 def set_global_seed(seed: int):
@@ -35,6 +27,222 @@ def set_global_seed(seed: int):
     torch.backends.cudnn.benchmark = False
 
 
+def load_json_config(config_path, required_keys=None):
+    """Load a JSON config and validate required keys if provided."""
+    with open(config_path, "r") as f:
+        config = json.load(f)
+    if required_keys:
+        missing = [key for key in required_keys if key not in config]
+        if missing:
+            raise ValueError(f"Config missing required keys: {missing}")
+    return config
+
+
+def config_name_from_path(config_path):
+    """Return the config file stem (basename without extension)."""
+    return os.path.splitext(os.path.basename(config_path))[0]
+
+
+def configure_device(use_amp_tf32):
+    """Select device and configure TF32/AMP settings."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    if torch.cuda.is_available():
+        torch.backends.cuda.matmul.allow_tf32 = bool(use_amp_tf32)
+        torch.backends.cudnn.allow_tf32 = bool(use_amp_tf32)
+        if hasattr(torch, "set_float32_matmul_precision"):
+            torch.set_float32_matmul_precision("high" if use_amp_tf32 else "highest")
+    use_amp = bool(use_amp_tf32) and torch.cuda.is_available()
+    return device, use_amp
+
+
+def build_dataloader(
+    dataset,
+    batch_size,
+    shuffle,
+    num_workers,
+    persistent_workers,
+    prefetch_factor,
+    seed=None,
+    pin_memory=False,
+    drop_last=False,
+):
+    """Build a DataLoader with optional deterministic shuffling."""
+    generator = None
+    if seed is not None:
+        generator = torch.Generator()
+        generator.manual_seed(seed)
+    kwargs = {
+        "batch_size": batch_size,
+        "shuffle": shuffle,
+        "num_workers": num_workers,
+        "pin_memory": pin_memory,
+        "drop_last": drop_last,
+    }
+    if generator is not None:
+        kwargs["generator"] = generator
+    if num_workers > 0:
+        kwargs["persistent_workers"] = persistent_workers
+        kwargs["prefetch_factor"] = prefetch_factor
+    return DataLoader(dataset, **kwargs)
+
+
+# -------------------- VQ pipeline helpers --------------------
+
+
+def psnr_from_images(pred, target):
+    """Calculate Peak Signal-to-Noise Ratio from image tensors."""
+    mse = torch.mean((pred - target) ** 2)
+    mse = torch.clamp(mse, min=1e-8)
+    return 20 * torch.log10(1.0 / torch.sqrt(mse))
+
+
+def plot_psnr_curves(psnr_history, results_dir):
+    """
+    Plot PSNR curves for all datasets
+    Args:
+        psnr_history: dict mapping dataset names to PSNR values over epochs
+        results_dir: directory to save plots
+    """
+    plt.figure(figsize=(10, 6))
+    epochs = range(1, len(psnr_history["total"]) + 1)
+
+    # Plot total average with dashed line
+    plt.plot(
+        epochs,
+        psnr_history["total"],
+        label="Total Average",
+        color="black",
+        linewidth=2.5,
+        linestyle="--",
+    )
+
+    # Plot individual dataset curves
+    dataset_keys = [k for k in psnr_history.keys() if k != "total"]
+    color_cycle = plt.cm.tab10.colors
+    for idx, ds_name in enumerate(dataset_keys):
+        plt.plot(
+            epochs,
+            psnr_history[ds_name],
+            label=f"{ds_name.capitalize()}",
+            color=color_cycle[idx % len(color_cycle)],
+            alpha=0.8,
+        )
+
+    plt.title("Reconstruction PSNR over Epochs")
+    plt.xlabel("Epochs")
+    plt.ylabel("PSNR (dB)")
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, "training_metrics_psnr.png"), dpi=150)
+    plt.close()
+
+
+def plot_codebook_usage(codebook_usage_history, results_dir):
+    """
+    Plot codebook utilization over training
+    Args:
+        codebook_usage_history: list of codebook usage percentages
+        results_dir: directory to save plots
+    """
+    plt.figure(figsize=(8, 5))
+    epochs = range(1, len(codebook_usage_history) + 1)
+    plt.plot(epochs, codebook_usage_history, color="purple")
+    plt.title("Codebook Utilization over Training")
+    plt.xlabel("Epochs")
+    plt.ylabel("Active Codes (%)")
+    plt.ylim(0, 105)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(os.path.join(results_dir, "training_metrics_codebook.png"), dpi=150)
+    plt.close()
+
+
+def plot_evolution(
+    history, track_indices, all_images_original, vis_intervals, results_dir
+):
+    """
+    Generate evolution plots showing reconstruction quality over training
+    Args:
+        history: dict mapping epochs to reconstructed images
+        track_indices: dict mapping dataset names to tracked image indices
+        all_images_original: list of original images
+        vis_intervals: list of epochs where snapshots were saved
+        results_dir: directory to save plots
+    """
+    sorted_intervals = sorted([t for t in vis_intervals if t in history])
+
+    for ds_name, indices in track_indices.items():
+        rows = len(indices)
+        cols = 1 + len(sorted_intervals)
+        fig, axes = plt.subplots(rows, cols, figsize=(2.5 * cols, 2.5 * rows))
+        if rows == 1:
+            axes = axes[None, :]
+
+        for r, global_idx in enumerate(indices):
+            gt = all_images_original[global_idx]
+
+            # Plot ground truth
+            ax_gt = axes[r, 0]
+            if gt.shape[-1] == 1:
+                ax_gt.imshow(gt.squeeze(), cmap="gray")
+            else:
+                ax_gt.imshow(gt)
+            ax_gt.axis("off")
+            if r == 0:
+                ax_gt.set_title("Ground Truth", fontsize=10, fontweight="bold")
+
+            # Plot reconstructions at different epochs
+            for c, epoch in enumerate(sorted_intervals):
+                ax = axes[r, c + 1]
+                if global_idx in history[epoch]:
+                    recon_img = history[epoch][global_idx]
+                    if recon_img.shape[-1] == 1:
+                        ax.imshow(recon_img.squeeze(), cmap="gray")
+                    else:
+                        ax.imshow(recon_img)
+                    curr_psnr = psnr_from_images(recon_img, gt).item()
+                    ax.set_title(f"Epoch {epoch}\n{curr_psnr:.1f} dB", fontsize=9)
+                else:
+                    ax.text(0.5, 0.5, "Missing", ha="center")
+                ax.axis("off")
+
+        plt.tight_layout()
+        save_path = os.path.join(results_dir, f"evolution_{ds_name}.png")
+        plt.savefig(save_path, dpi=150, bbox_inches="tight")
+        plt.close()
+
+
+def save_all_visualizations(module, all_images_original, vis_intervals, results_dir):
+    """
+    Save all visualization plots
+    Args:
+        module: trained MultiImageINRModule
+        all_images_original: list of original images
+        vis_intervals: list of epochs where snapshots were saved
+        results_dir: directory to save plots
+    """
+    os.makedirs(results_dir, exist_ok=True)
+
+    plot_psnr_curves(module.psnr_history, results_dir)
+    plot_codebook_usage(module.codebook_usage_history, results_dir)
+
+    plot_evolution(
+        module.history,
+        module.track_indices,
+        all_images_original,
+        vis_intervals,
+        results_dir,
+    )
+
+
+# -------------------- Experiment helpers --------------------
+
+
+def count_parameters(model):
+    return sum(p.numel() for p in model.parameters() if p.requires_grad)
+
+
 def setup_experiment_folder(config, base_name="experiment"):
     if not os.path.exists(base_name):
         os.makedirs(base_name)
@@ -45,11 +253,22 @@ def setup_experiment_folder(config, base_name="experiment"):
     return base_name
 
 
+def make_run_folder(output_folder, run_name, config):
+    """Create a run folder inside output_folder and persist config."""
+    output_folder = output_folder or "."
+    os.makedirs(output_folder, exist_ok=True)
+    base_name = os.path.join(output_folder, run_name)
+    return setup_experiment_folder(config, base_name=base_name)
+
+
+# -------------------- Latent size/res pipeline helpers --------------------
+
+
 # -------------------- Metrics and evaluation ---------------------
 
 
-def calculate_psnr(mse_loss):
-    # add epsilon to avoid log(0).
+def psnr_from_mse(mse_loss):
+    """Calculate PSNR from a scalar MSE tensor."""
     return -10 * torch.log10(mse_loss + 1e-8)
 
 
@@ -71,11 +290,13 @@ def reconstruct_single_image(model, img_idx, dataset, device, batch_size=4096):
         # Process in chunks to prevent GPU out-of-memory on large grids
         for i in range(0, total_pixels, batch_size):
             # 1. Prepare Chunk
-            coord_chunk = all_coords[i : i+batch_size]
+            coord_chunk = all_coords[i : i + batch_size]
             chunk_len = coord_chunk.shape[0]
 
             # 2. Prepare Indices (All same image index)
-            idx_chunk = torch.full((chunk_len,), img_idx, dtype=torch.long, device=device)
+            idx_chunk = torch.full(
+                (chunk_len,), img_idx, dtype=torch.long, device=device
+            )
 
             # 3. Model Forward
             # Works for both Spatial (AutoDecoderCNN) and Vector (Standard) models
@@ -85,6 +306,7 @@ def reconstruct_single_image(model, img_idx, dataset, device, batch_size=4096):
 
     # Concatenate all chunks back into one big vector, preserving dataset coord order.
     return torch.cat(pred_chunks, dim=0)
+
 
 def evaluate_dataset_psnr(model, dataset, device):
     psnr_dict = {}
@@ -99,11 +321,12 @@ def evaluate_dataset_psnr(model, dataset, device):
 
         # compute metric
         mse = mse_fn(pred_flat, gt_flat)
-        psnr = calculate_psnr(mse)
+        psnr = psnr_from_mse(mse)
         psnr_dict[k] = psnr.item()
 
     model.train()  # return to training mode after evaluation
     return psnr_dict
+
 
 #  --------------------- Plotting & Saving ---------------------
 
@@ -127,7 +350,7 @@ def _select_reference_indices(dataset, max_per_dataset):
 
 
 def save_reference_reconstructions(
-    model, dataset, step, run_folder, device, max_per_dataset=5
+    model, dataset, epoch, run_folder, device, max_per_dataset=5
 ):
     """
     Save side-by-side GT/reconstruction pairs for up to `max_per_dataset` images
@@ -160,14 +383,14 @@ def save_reference_reconstructions(
     batch_tensor = torch.stack(img_list)
     grid_img = make_grid(batch_tensor, nrow=5, padding=2)
 
-    save_image(grid_img, os.path.join(run_folder, f"recons_refs_step_{step}.png"))
+    save_image(grid_img, os.path.join(run_folder, f"recons_refs_epoch_{epoch}.png"))
     model.train()  # return to training mode after evaluation
 
 
 def plot_tsne(
     model,
     dataset,
-    step,
+    epoch,
     run_folder,
     expected_num_clusters=1,
 ):
@@ -188,8 +411,8 @@ def plot_tsne(
             - H,W : height/width
             - C   : number of channels
             - flat_pixels: (K, H*W, C) tensor in [0, 1]
-    step: int
-        Current training step (only used for the filename).
+    epoch: int
+        Current epoch index (only used for the filename).
     run_folder: str
         Where to store the PNG.
     expected_num_clusters: int, optional
@@ -358,7 +581,7 @@ def plot_tsne(
         )
 
     fig.tight_layout()
-    filename = f"tsne_2d_step_{step}.png"
+    filename = f"tsne_2d_epoch_{epoch}.png"
     fig.savefig(os.path.join(run_folder, filename))
     plt.close(fig)
 
