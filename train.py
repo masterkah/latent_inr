@@ -92,7 +92,9 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
     # conv_kernel_size controls the shared conv for s>1; padding preserves spatial dims.
     LATENT_FEATURE_DIM = config["LATENT_FEATURE_DIM"]
     conv_kernel_size_value = config["CONV_KERNEL_SIZE"]
-    CONV_KERNEL_SIZE = None if conv_kernel_size_value is None else int(conv_kernel_size_value)
+    CONV_KERNEL_SIZE = (
+        None if conv_kernel_size_value is None else int(conv_kernel_size_value)
+    )
     latent_sizes = config["LATENT_SIZES"]
     latent_spatial_dims = config["LATENT_SPATIAL_DIMS"]
     num_workers = int(config["NUM_WORKERS"])
@@ -324,9 +326,7 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
                 debug or ((not debug) and epoch_idx % VIZ_INTERVAL == 0)
             ):
                 psnr_display = (
-                    f"{last_avg_psnr:.2f} dB"
-                    if last_avg_psnr is not None
-                    else "n/a"
+                    f"{last_avg_psnr:.2f} dB" if last_avg_psnr is not None else "n/a"
                 )
                 print(
                     f"Epoch {epoch_idx} | Rec loss: {last_rec_loss.item():.6f} | Avg PSNR: {psnr_display}"

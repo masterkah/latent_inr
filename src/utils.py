@@ -330,6 +330,7 @@ def evaluate_dataset_psnr(model, dataset, device):
 
 #  --------------------- Plotting & Saving ---------------------
 
+
 def _select_reference_indices(dataset, max_per_dataset):
     """
     Choose up to `max_per_dataset` indices per dataset source (if provided).
@@ -588,30 +589,35 @@ def plot_tsne(
 
 # --------------------- Checkpoint Functions ---------------------
 
+
 def save_checkpoint(
     model, optimizer, step, config, run_folder, filename=None, subdir="checkpoints"
 ):
     """Saves model (including buffers) and optimizer state for inference reuse."""
     if filename is None:
         filename = f"checkpoint_step_{step}.pth"
-        
+
     ckpt_folder = os.path.join(run_folder, subdir)
     if not os.path.exists(ckpt_folder):
         os.makedirs(ckpt_folder)
-        
+
     save_path = os.path.join(ckpt_folder, filename)
-    
-    torch.save({
-        'step': step,
-        'model_state_dict': model.state_dict(),
-        'optimizer_state_dict': optimizer.state_dict(),
-        'config': config
-    }, save_path)
+
+    torch.save(
+        {
+            "step": step,
+            "model_state_dict": model.state_dict(),
+            "optimizer_state_dict": optimizer.state_dict(),
+            "config": config,
+        },
+        save_path,
+    )
     print(f"Checkpoint saved: {save_path}")
+
 
 def load_checkpoint(model, checkpoint_path, device, optimizer=None, strict=True):
     """
-    Loads weights into model. 
+    Loads weights into model.
     If optimizer is provided, loads optimizer state (for resuming training).
     For this project, checkpoints are intended for inference reuse, not for
     resuming training.
@@ -619,18 +625,18 @@ def load_checkpoint(model, checkpoint_path, device, optimizer=None, strict=True)
     """
     if not os.path.exists(checkpoint_path):
         raise FileNotFoundError(f"Checkpoint not found at {checkpoint_path}")
-        
+
     print(f"Loading checkpoint from {checkpoint_path}...")
     checkpoint = torch.load(checkpoint_path, map_location=device)
-    
-    model.load_state_dict(checkpoint['model_state_dict'], strict=strict)
-    
-    if optimizer is not None and 'optimizer_state_dict' in checkpoint:
-        optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+
+    model.load_state_dict(checkpoint["model_state_dict"], strict=strict)
+
+    if optimizer is not None and "optimizer_state_dict" in checkpoint:
+        optimizer.load_state_dict(checkpoint["optimizer_state_dict"])
         print("Optimizer state loaded.")
-        
-    step = checkpoint.get('step', 0)
-    config = checkpoint.get('config', {})
+
+    step = checkpoint.get("step", 0)
+    config = checkpoint.get("config", {})
     print(f"Model loaded at step {step}")
-    
+
     return step, config
