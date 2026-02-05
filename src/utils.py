@@ -5,6 +5,7 @@ import torch
 import torch.nn as nn
 import matplotlib.pyplot as plt
 import numpy as np
+import csv
 from torch.utils.data import DataLoader
 from torchvision.utils import make_grid, save_image
 from sklearn.manifold import TSNE
@@ -226,6 +227,9 @@ def save_all_visualizations(module, all_images_original, vis_intervals, results_
 
     plot_psnr_curves(module.psnr_history, results_dir)
     plot_codebook_usage(module.codebook_usage_history, results_dir)
+    save_training_metrics_csv(
+        module.psnr_history, module.codebook_usage_history, results_dir
+    )
 
     plot_evolution(
         module.history,
@@ -234,6 +238,44 @@ def save_all_visualizations(module, all_images_original, vis_intervals, results_
         vis_intervals,
         results_dir,
     )
+
+def save_training_metrics_csv(psnr_history, codebook_usage_history, results_dir):
+    """
+    Save PSNR history and codebook usage to CSV files.
+    Args:
+        psnr_history: dict mapping dataset names to PSNR values over epochs
+        codebook_usage_history: list of codebook usage percentages
+        results_dir: directory to save CSVs
+    """
+    os.makedirs(results_dir, exist_ok=True)
+
+    total_epochs = min(
+        len(psnr_history.get("total", [])), len(codebook_usage_history)
+    )
+    if total_epochs == 0:
+        return
+
+    dataset_keys = [k for k in psnr_history.keys() if k != "total"]
+    dataset_keys = sorted(dataset_keys)
+
+    psnr_path = os.path.join(results_dir, "psnr_history.csv")
+    with open(psnr_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        header = ["epoch", "psnr_total"] + [f"psnr_{k}" for k in dataset_keys]
+        writer.writerow(header)
+        for epoch_idx in range(total_epochs):
+            row = [epoch_idx + 1, psnr_history["total"][epoch_idx]]
+            for key in dataset_keys:
+                vals = psnr_history.get(key, [])
+                row.append(vals[epoch_idx] if epoch_idx < len(vals) else "")
+            writer.writerow(row)
+
+    codebook_path = os.path.join(results_dir, "codebook_usage.csv")
+    with open(codebook_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["epoch", "codebook_usage"])
+        for epoch_idx in range(total_epochs):
+            writer.writerow([epoch_idx + 1, codebook_usage_history[epoch_idx]])
 
 
 # -------------------- Experiment helpers --------------------
