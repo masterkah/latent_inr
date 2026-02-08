@@ -4,6 +4,7 @@ Reads configuration from JSON and trains a VQINR model.
 """
 
 import argparse
+import os
 import torch
 import lightning as pl
 
@@ -58,6 +59,67 @@ def _create_model(config, num_images, value_dim):
         activation=config.get("ACTIVATION", "siren"),
         num_freqs=config.get("NUM_FREQS", 10),
     )
+
+
+def _codebook_bytes(model):
+    total = 0
+    for vq in model.vq_layers:
+        for name in ("embedding", "ema_embedding", "ema_cluster_size"):
+            t = getattr(vq, name)
+            total += t.numel() * t.element_size()
+    return total
+
+
+def _bytes_to_mb(num_bytes):
+    return num_bytes / (1024 * 1024)
+
+
+def _write_codebook_memory_txt(run_folder, model):
+    codebook_mem_bytes = _codebook_bytes(model)
+    codebook_mem_mb = _bytes_to_mb(codebook_mem_bytes)
+    out_path = os.path.join(run_folder, "codebook_memory.txt")
+    with open(out_path, "w") as f:
+        f.write(f"codebook_memory_bytes: {codebook_mem_bytes}\n")
+        f.write(f"codebook_memory_mb: {codebook_mem_mb:.6f}\n")
+        f.write(
+            "formula: total_bytes = num_latent_vectors * "
+            "(2 * num_codes * latent_dim + num_codes) * bytes_per_elem\n"
+        )
+    return out_path
+
+
+def _export_codebook_indices(run_folder, model):
+    model.eval()
+    with torch.no_grad():
+        latents = model.latents.detach()
+        z = latents.mean(dim=1)
+        residual = z
+        indices_per_stage = []
+        for vq_layer in model.vq_layers:
+            z_q_stage, indices, _ = vq_layer(residual)
+            indices_per_stage.append(indices)
+            residual = residual - z_q_stage
+
+    indices = torch.stack(indices_per_stage, dim=1).cpu()
+    max_codes = max(vq.num_codes for vq in model.vq_layers)
+    if max_codes <= 256:
+        idx_dtype = torch.uint8
+    elif max_codes <= 65535:
+        idx_dtype = torch.uint16
+    else:
+        idx_dtype = torch.uint32
+    indices = indices.to(idx_dtype)
+
+    export = {
+        "indices": indices,
+        "embeddings": [vq.embedding.detach().cpu() for vq in model.vq_layers],
+        "num_codes": [vq.num_codes for vq in model.vq_layers],
+        "latent_dim": model.latent_dim,
+        "num_latent_vectors": model.num_latent_vectors,
+    }
+    out_path = os.path.join(run_folder, "codebook_export.pt")
+    torch.save(export, out_path)
+    return out_path
 
 
 def main():
@@ -158,6 +220,11 @@ def main():
     )
 
     vqinr = _create_model(config, len(all_images_original), value_dim)
+    codebook_mem_bytes = _codebook_bytes(vqinr)
+    print(
+        f"Codebook memory: {_bytes_to_mb(codebook_mem_bytes):.2f} MB "
+        f"({codebook_mem_bytes} bytes)"
+    )
 
     if VIZ_INTERVAL <= 0:
         raise ValueError("VIZ_INTERVAL must be a positive integer.")
@@ -191,6 +258,11 @@ def main():
 
     print("\nStarting Training...")
     trainer.fit(module, dataloader)
+
+    codebook_txt = _write_codebook_memory_txt(run_folder, vqinr)
+    print(f"Wrote codebook memory to: {codebook_txt}")
+    export_path = _export_codebook_indices(run_folder, vqinr)
+    print(f"Wrote codebook export to: {export_path}")
 
     save_all_visualizations(
         module,
