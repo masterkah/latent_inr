@@ -4,6 +4,7 @@ import os
 import sys
 from typing import Dict, List, Tuple, Any, Optional, Callable
 import math
+import re
 
 import matplotlib.pyplot as plt
 
@@ -41,12 +42,49 @@ def read_csv_columns(path: str) -> Dict[str, List[Any]]:
     return columns
 
 
-def default_label_from_path(path: str) -> str:
+def simplify_label(label: str) -> str:
+    name = re.sub(r"^run[_-]*", "", label, flags=re.IGNORECASE)
+    lower = name.lower()
+
+    codebook_match = re.search(r"(?:codebook[_-]?|c)(\d+)", lower)
+    if codebook_match:
+        return f"Codebook Size {codebook_match.group(1)}"
+
+    latent_size_match = re.search(r"latent[_-]?size[_-]?(?:only[_-]?)?(\\d+)", lower)
+    if latent_size_match:
+        return f"Latent size {latent_size_match.group(1)}"
+
+    latent_res_match = re.search(r"latent[_-]?resolution[_-]?(\\d+x\\d+)", lower)
+    if latent_res_match:
+        return f"Latent resolution {latent_res_match.group(1)}"
+
+    tokens = re.split(r"[_-]+", name)
+    drop = {
+        "run",
+        "vq",
+        "vqinr",
+        "relu",
+        "siren",
+        "set",
+        "newset",
+        "codebook",
+    }
+    cleaned = [t for t in tokens if t and t.lower() not in drop]
+    if cleaned:
+        return " ".join(cleaned)
+    return name
+
+
+def default_label_from_path(path: str, style: str) -> str:
     base = os.path.basename(path)
     if base in {"psnr_history.csv", "codebook_usage.csv", "training_metrics.csv"}:
         parent = os.path.basename(os.path.dirname(path))
-        return parent or base
-    return os.path.splitext(base)[0]
+        label = parent or base
+    else:
+        label = os.path.splitext(base)[0]
+    if style == "simple":
+        return simplify_label(label)
+    return label
 
 
 def select_psnr_column(columns: Dict[str, List[Any]], preferred: Optional[str]) -> str:
@@ -159,6 +197,7 @@ def build_series(
     y_selector: Callable[[Dict[str, List[Any]]], List[float]],
     sample_every: int,
     max_points: int,
+    label_style: str,
 ) -> List[Tuple[List[float], List[float], str]]:
     if labels and len(labels) != len(files):
         raise ValueError("Label count must match file count")
@@ -171,7 +210,7 @@ def build_series(
             x = list(range(1, len(y_vals) + 1))
         else:
             x = [float(v) for v in x if v is not None]
-        label = labels[idx] if labels else default_label_from_path(path)
+        label = labels[idx] if labels else default_label_from_path(path, label_style)
         min_len = min(len(x), len(y_vals))
         x_vals = x[:min_len]
         y_vals = y_vals[:min_len]
@@ -188,6 +227,11 @@ def plot_series(
 ):
     if not series:
         return
+    def sort_key_label(label: str):
+        match = re.search(r"(\d+)", label)
+        return int(match.group(1)) if match else float("inf")
+
+    series = sorted(series, key=lambda item: sort_key_label(item[2]))
     plt.figure(figsize=(9, 5))
     for x_vals, y_vals, label in series:
         plt.plot(x_vals, y_vals, label=label, linewidth=2)
@@ -195,7 +239,13 @@ def plot_series(
     plt.xlabel("Epoch")
     plt.ylabel(ylabel)
     plt.grid(True, alpha=0.3)
-    plt.legend()
+    handles, labels = plt.gca().get_legend_handles_labels()
+    if labels:
+        ordered = sorted(zip(handles, labels), key=lambda hl: sort_key_label(hl[1]))
+        handles, labels = zip(*ordered)
+        plt.legend(handles, labels)
+    else:
+        plt.legend()
     plt.tight_layout()
     plt.savefig(output_path, dpi=150)
     plt.close()
@@ -277,6 +327,12 @@ def main():
         default=300,
         help="Cap the number of plotted points (0 disables)",
     )
+    parser.add_argument(
+        "--label-style",
+        choices=["simple", "raw"],
+        default="simple",
+        help="Legend label style for auto-generated labels",
+    )
 
     args = parser.parse_args()
 
@@ -304,9 +360,10 @@ def main():
             lambda cols: psnr_values(cols, args.psnr_column, args.psnr_avg),
             args.sample_every,
             args.max_points,
+            args.label_style,
         )
         psnr_out = args.psnr_out or os.path.join(args.out_dir, "psnr_compare.png")
-        psnr_title = "PSNR Curves (Mean)" if args.psnr_avg else "PSNR Curves"
+        psnr_title = "PSNR Curves (Trained on 3k images)"
         psnr_ylabel = "Mean PSNR (dB)" if args.psnr_avg else "PSNR (dB)"
         plot_series(series, psnr_title, psnr_ylabel, psnr_out)
 
@@ -317,11 +374,17 @@ def main():
             lambda cols: codebook_values(cols, args.codebook_column),
             args.sample_every,
             args.max_points,
+            args.label_style,
         )
         codebook_out = args.codebook_out or os.path.join(
             args.out_dir, "codebook_compare.png"
         )
-        plot_series(series, "Codebook Utilization", "Active Codes (%)", codebook_out)
+        plot_series(
+            series,
+            "Codebook Utilization (Trained on 3k images)",
+            "Active Codes (%)",
+            codebook_out,
+        )
 
 
 if __name__ == "__main__":

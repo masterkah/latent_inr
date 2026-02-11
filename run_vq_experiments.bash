@@ -9,6 +9,7 @@ USE_AMP_TF32="${USE_AMP_TF32:-0}"
 CONFIGS=("$@")
 if [ ${#CONFIGS[@]} -eq 0 ]; then
   CONFIGS=(
+    #"$ROOT_DIR/config/vqinr_siren_3000.json"
     "$ROOT_DIR/config/vqinr_relu_3000_codebook_64.json"
     "$ROOT_DIR/config/vqinr_relu_3000_codebook_128.json"
     "$ROOT_DIR/config/vqinr_relu_3000_codebook_256.json"
@@ -17,9 +18,7 @@ if [ ${#CONFIGS[@]} -eq 0 ]; then
 fi
 
 PSNR_FILES=()
-PSNR_LABELS=()
 CODEBOOK_FILES=()
-CODEBOOK_LABELS=()
 
 for cfg in "${CONFIGS[@]}"; do
   if [ ! -f "$cfg" ]; then
@@ -38,14 +37,12 @@ for cfg in "${CONFIGS[@]}"; do
 
   if [ -f "$psnr_file" ]; then
     PSNR_FILES+=("$psnr_file")
-    PSNR_LABELS+=("$name")
   else
     echo "Warning: PSNR file missing: $psnr_file" >&2
   fi
 
   if [ -f "$codebook_file" ]; then
     CODEBOOK_FILES+=("$codebook_file")
-    CODEBOOK_LABELS+=("$name")
   else
     echo "Warning: codebook file missing: $codebook_file" >&2
   fi
@@ -55,10 +52,10 @@ done
 echo "==> Plotting"
 VIS_CMD=(python "$ROOT_DIR/src/vq_visualization.py" --out-dir "$PLOTS_DIR" --psnr-avg --max-points 300)
 if [ ${#PSNR_FILES[@]} -gt 0 ]; then
-  VIS_CMD+=(--psnr-files "${PSNR_FILES[@]}" --psnr-labels "${PSNR_LABELS[@]}")
+  VIS_CMD+=(--psnr-files "${PSNR_FILES[@]}")
 fi
 if [ ${#CODEBOOK_FILES[@]} -gt 0 ]; then
-  VIS_CMD+=(--codebook-files "${CODEBOOK_FILES[@]}" --codebook-labels "${CODEBOOK_LABELS[@]}")
+  VIS_CMD+=(--codebook-files "${CODEBOOK_FILES[@]}")
 fi
 "${VIS_CMD[@]}"
 
