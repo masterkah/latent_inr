@@ -322,15 +322,15 @@ def train(config_path, debug=0, use_amp_tf32=1, output_folder="."):
                         expected_num_clusters=len(DATASET_NAMES),
                     )
 
-            if last_rec_loss is not None and (
-                debug or ((not debug) and epoch_idx % VIZ_INTERVAL == 0)
-            ):
-                psnr_display = (
-                    f"{last_avg_psnr:.2f} dB" if last_avg_psnr is not None else "n/a"
-                )
-                print(
-                    f"Epoch {epoch_idx} | Rec loss: {last_rec_loss.item():.6f} | Avg PSNR: {psnr_display}"
-                )
+                if last_rec_loss is not None and (
+                    debug or ((not debug) and epoch_idx % VIZ_INTERVAL == 0)
+                ):
+                    psnr_display = (
+                        f"{last_avg_psnr:.2f} dB" if last_avg_psnr is not None else "n/a"
+                    )
+                    print(
+                        f"Epoch {epoch_idx} | Rec loss: {last_rec_loss.item():.6f} | Avg PSNR: {psnr_display}"
+                    )
 
             # Save final model state for inference reuse (once per run).
             run_tag = f"run_latent_{latent_size}_s{latent_spatial_dim}"
@@ -480,3 +480,4 @@ if __name__ == "__main__":
         use_amp_tf32=args.use_amp_tf32,
         output_folder=args.output_folder,
     )
+

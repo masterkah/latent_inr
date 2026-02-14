@@ -50,11 +50,11 @@ def simplify_label(label: str) -> str:
     if codebook_match:
         return f"Codebook Size {codebook_match.group(1)}"
 
-    latent_size_match = re.search(r"latent[_-]?size[_-]?(?:only[_-]?)?(\\d+)", lower)
+    latent_size_match = re.search(r"latent[_-]?size[_-]?(?:only[_-]?)?(\d+)", lower)
     if latent_size_match:
         return f"Latent size {latent_size_match.group(1)}"
 
-    latent_res_match = re.search(r"latent[_-]?resolution[_-]?(\\d+x\\d+)", lower)
+    latent_res_match = re.search(r"latent[_-]?resolution[_-]?(\d+x\d+)", lower)
     if latent_res_match:
         return f"Latent resolution {latent_res_match.group(1)}"
 
@@ -363,7 +363,7 @@ def main():
             args.label_style,
         )
         psnr_out = args.psnr_out or os.path.join(args.out_dir, "psnr_compare.png")
-        psnr_title = "PSNR Curves (Trained on 3k images)"
+        psnr_title = "PSNR Curves"
         psnr_ylabel = "Mean PSNR (dB)" if args.psnr_avg else "PSNR (dB)"
         plot_series(series, psnr_title, psnr_ylabel, psnr_out)
 
@@ -381,7 +381,7 @@ def main():
         )
         plot_series(
             series,
-            "Codebook Utilization (Trained on 3k images)",
+            "Codebook Utilization",
             "Active Codes (%)",
             codebook_out,
         )

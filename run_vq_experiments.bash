@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 OUT_DIR="${OUT_DIR:-$ROOT_DIR/experiments}"
-PLOTS_DIR="${PLOTS_DIR:-$ROOT_DIR/res}"
+PLOTS_DIR="$OUT_DIR"
 USE_AMP_TF32="${USE_AMP_TF32:-0}"
 
 CONFIGS=("$@")

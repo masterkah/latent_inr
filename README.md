@@ -46,20 +46,42 @@ Codebook/VQ (train_vq.py) key knobs:
 
 From the repo root:
 
+Latent size/resolution pipeline (`train.py`):
+
 ```bash
 python train.py -config config/latent_size_only_300.json -output-folder "experiments"
 ```
+
+VQ pipeline, mode 1: single config run (`train_vq.py`):
+
+```bash
+python train_vq.py -config config/vqinr_relu_3000.json -output-folder "experiments" -debug 0 -use-amp-tf32 1
+```
+
+VQ pipeline, mode 2: sweep script (`run_vq_experiments.bash`):
 
 ```bash
 bash run_vq_experiments.bash
 ```
 
-Flags:
+You can also pass explicit config files to the sweep script:
+
+```bash
+bash run_vq_experiments.bash config/vqinr_relu_3000_codebook_64.json config/vqinr_relu_3000_codebook_128.json
+```
+
+CLI flags for `train.py` and `train_vq.py`:
 
 - `-config` (required): path to the JSON config.
 - `-debug` (default: `0`): `1` logs every epoch; `0` logs at `VIZ_INTERVAL` epochs.
 - `-use-amp-tf32` (default: `1`): enables AMP/TF32 when CUDA is available.
 - `-output-folder` (default: `.`): base folder for all outputs.
+
+Sweep-script options (`run_vq_experiments.bash`):
+
+- positional args: optional list of config paths to run.
+- env `OUT_DIR` (default: `./experiments`): output root.
+- env `USE_AMP_TF32` (default: `0`): passed through to `train_vq.py`.
 
 Note: VQ runs with `ACTIVATION="siren"` auto-disable AMP to avoid NaNs.
 
@@ -88,4 +110,13 @@ Each VQ run writes to:
 - `run_vq_<config_name>/config.json`
 - `training_metrics_psnr.png`
 - `training_metrics_codebook.png`
+- `psnr_history.csv`
+- `codebook_usage.csv`
+- `codebook_memory.txt`
+- `codebook_export.pt`
 - `evolution_<dataset>.png` (tracked images across epochs)
+
+When using `run_vq_experiments.bash`, the output folder root also gets:
+
+- `psnr_compare.png` (cross-run PSNR comparison)
+- `codebook_compare.png` (cross-run codebook-utilization comparison)
